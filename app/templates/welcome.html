@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>欢迎使用 tgState</title>
+    <link rel="stylesheet" href="/static/ui.css">
+    <script src="/static/ui.js"></script>
+    <style>
+        .welcome-container {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            text-align: center;
+        }
+        .hero-logo {
+            width: 80px;
+            height: 80px;
+            background: var(--primary-color);
+            border-radius: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            margin-bottom: 32px;
+            box-shadow: var(--shadow-md);
+        }
+        .hero-title {
+            font-size: 40px;
+            font-weight: 800;
+            color: var(--text-primary);
+            margin: 0 0 16px;
+            letter-spacing: -1px;
+        }
+        .hero-desc {
+            font-size: 18px;
+            color: var(--text-secondary);
+            max-width: 500px;
+            margin: 0 auto 48px;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <div class="welcome-container">
+        <div class="hero-logo">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+        </div>
+        
+        <h1 class="hero-title">tgState</h1>
+        <p class="hero-desc">将 Telegram 变成您的无限私有云存储。</p>
+        
+        <div class="card" style="width: 100%; max-width: 400px; padding: 32px; text-align: left;">
+            <h2 style="font-size: 18px; font-weight: 600; margin-bottom: 24px;">初始化设置</h2>
+            <form id="setup-form" onsubmit="return false;">
+                <div class="input-group">
+                    <label class="input-label">设置管理员密码</label>
+                    <input type="password" class="input-field" name="password" id="password" placeholder="请输入强密码" required autofocus>
+                    <div class="text-sm text-muted mt-4">此密码将用于登录管理控制台。</div>
+                </div>
+                
+                <button type="submit" class="btn btn-primary" style="width: 100%;" onclick="submitSetup()">
+                    完成设置
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        async function submitSetup() {
+            const pwd = document.getElementById('password').value;
+            if (!pwd) {
+                Toast.show('请输入密码', 'error');
+                return;
+            }
+            
+            const btn = document.querySelector('button[type="submit"]');
+            Utils.setLoading(btn, true);
+            
+            try {
+                const res = await fetch('/api/set-password', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ password: pwd })
+                });
+                
+                const json = await res.json();
+                if (res.ok) {
+                    Toast.show('设置成功，正在登录...');
+                    
+                    // 自动登录：使用 /api/auth/login 接口，确保 Cookie 被正确设置 (SHA256 Hash)
+                    try {
+                        const loginRes = await fetch('/api/auth/login', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ password: pwd })
+                        });
+                        
+                        if (loginRes.ok) {
+                             setTimeout(() => window.location.href = '/', 1000);
+                        } else {
+                             // 理论上刚设置完不应该错，除非并发问题
+                             Toast.show('自动登录失败，请手动登录', 'error');
+                             setTimeout(() => window.location.href = '/login', 2000);
+                        }
+                    } catch (e) {
+                         Toast.show('自动登录出错', 'error');
+                         setTimeout(() => window.location.href = '/login', 2000);
+                    }
+                } else {
+                    Toast.show(json.detail?.message || '设置失败', 'error');
+                }
+            } catch (e) {
+                Toast.show('网络错误', 'error');
+            } finally {
+                Utils.setLoading(btn, false);
+            }
+        }
+    </script>
+</body>
+</html>

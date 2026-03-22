@@ -1,0 +1,53 @@
+[package]
+name = "tgstate"
+version = "2.0.0"
+edition = "2021"
+description = "A Telegram-based private file storage system"
+rust-version = "1.75"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "trace"] }
+
+# Templating
+tera = "1"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["stream", "multipart", "json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Env
+dotenvy = "0.15"
+
+# Crypto
+sha2 = "0.10"
+hex = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+rand = "0.8"
+mime_guess = "2"
+tempfile = "3"
+percent-encoding = "2"
+tokio-stream = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
