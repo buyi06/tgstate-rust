@@ -4,7 +4,7 @@ use serde::Serialize;
 use crate::database;
 use crate::telegram::types::*;
 
-const CHUNK_SIZE_BYTES: u64 = (19.5 * 1024.0 * 1024.0) as u64;
+const CHUNK_SIZE_BYTES: usize = (19.5 * 1024.0 * 1024.0) as usize;
 
 #[derive(Clone)]
 pub struct TelegramService {
@@ -75,13 +75,16 @@ impl TelegramService {
         filename: &str,
         reply_to: Option<i64>,
     ) -> Result<Message, String> {
+        let mime_type = mime_guess::from_path(filename)
+            .first_or_octet_stream()
+            .to_string();
+        let part = multipart::Part::bytes(file_bytes)
+            .file_name(filename.to_string())
+            .mime_str(&mime_type)
+            .map_err(|e| format!("Invalid MIME type: {}", e))?;
         let form = multipart::Form::new()
             .text("chat_id", self.channel_name.clone())
-            .part(
-                "document",
-                multipart::Part::bytes(file_bytes)
-                    .file_name(filename.to_string()),
-            );
+            .part("document", part);
 
         let form = if let Some(reply_id) = reply_to {
             form.text("reply_to_message_id", reply_id.to_string())
@@ -114,7 +117,7 @@ impl TelegramService {
 
     pub async fn upload_file(
         &self,
-        file_path: &str,
+        file_bytes: Vec<u8>,
         file_name: &str,
         db_path: &str,
     ) -> Result<String, String> {
@@ -122,16 +125,14 @@ impl TelegramService {
             return Err("CHANNEL_NAME not configured".into());
         }
 
-        let metadata = std::fs::metadata(file_path).map_err(|e| e.to_string())?;
-        let file_size = metadata.len();
+        let file_size = file_bytes.len();
 
         if file_size >= CHUNK_SIZE_BYTES {
             tracing::info!("文件 {} 较大 ({}MB)，将分块上传", file_name, file_size / (1024 * 1024));
-            return self.upload_as_chunks(file_path, file_name, db_path).await;
+            return self.upload_as_chunks(file_bytes, file_name, db_path).await;
         }
 
         tracing::info!("直接上传文件: {}", file_name);
-        let file_bytes = std::fs::read(file_path).map_err(|e| e.to_string())?;
         let message = self.send_document(file_bytes, file_name, None).await?;
 
         let doc = message
@@ -145,17 +146,16 @@ impl TelegramService {
 
     async fn upload_as_chunks(
         &self,
-        file_path: &str,
+        file_bytes: Vec<u8>,
         original_filename: &str,
         db_path: &str,
     ) -> Result<String, String> {
-        let file_bytes = std::fs::read(file_path).map_err(|e| e.to_string())?;
         let total_size = file_bytes.len() as i64;
         let mut chunk_ids: Vec<String> = Vec::new();
         let mut first_message_id: Option<i64> = None;
         let mut chunk_num = 0;
 
-        for chunk in file_bytes.chunks(CHUNK_SIZE_BYTES as usize) {
+        for chunk in file_bytes.chunks(CHUNK_SIZE_BYTES) {
             chunk_num += 1;
             let chunk_name = format!("{}.part{}", original_filename, chunk_num);
 

@@ -150,28 +150,9 @@ async fn upload_file(
         )
     })?;
 
-    tracing::info!("开始上传文件: {}", filename);
+    tracing::info!("开始上传文件: {} ({}字节)", filename, data.len());
 
-    // Write to temp file
-    let temp_dir = tempfile::tempdir().map_err(|e| {
-        tracing::error!("创建临时目录失败: {:?}", e);
-        http_error(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "文件处理失败",
-            "temp_error",
-        )
-    })?;
-    let temp_path = temp_dir.path().join(&filename);
-    std::fs::write(&temp_path, &data).map_err(|e| {
-        tracing::error!("写入临时文件失败: {:?}", e);
-        http_error(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "文件处理失败",
-            "temp_error",
-        )
-    })?;
-
-    // Upload to Telegram
+    // Upload to Telegram directly from memory (no temp file needed)
     let tg_service = TelegramService::new(
         bot_token.to_string(),
         channel_name.to_string(),
@@ -180,13 +161,13 @@ async fn upload_file(
 
     let db_path = state.db_path();
     let short_id = tg_service
-        .upload_file(temp_path.to_str().unwrap(), &filename, &db_path)
+        .upload_file(data, &filename, &db_path)
         .await
         .map_err(|e| {
             tracing::error!("文件上传失败: {} - {}", filename, e);
             http_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "文件上传失败。",
+                &format!("文件上传失败: {}", e),
                 "upload_failed",
             )
         })?;
