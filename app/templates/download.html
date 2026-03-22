@@ -1,51 +1,174 @@
-{% extends "base.html" %}
-
-{% block title %}文件分享 - tgState{% endblock %}
-
-{% block content %}
-<div style="display: flex; align-items: center; justify-content: center; min-height: 60vh;">
-    <div class="card" style="width: 100%; max-width: 600px; padding: 32px;">
-        <div style="text-align: center; margin-bottom: 32px;">
-            <div style="width: 64px; height: 64px; background: var(--bg-surface-hover); border-radius: 16px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 24px; color: var(--primary-color);">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ file.filename }} - tgState</title>
+    <link rel="stylesheet" href="/static/ui.css">
+    <script src="/static/ui.js"></script>
+    <script>
+        (function() {
+            const pref = localStorage.getItem('tgstate_theme_pref') || 'auto';
+            let mode = pref;
+            if (pref === 'auto') mode = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', mode);
+        })();
+    </script>
+    <style>
+        .share-container {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            background: var(--bg-body);
+        }
+        .share-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 32px;
+        }
+        .share-brand-icon {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, #2563eb, #7c3aed);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+        .share-card {
+            width: 100%;
+            max-width: 560px;
+            padding: 40px 32px;
+        }
+        .file-icon {
+            width: 72px;
+            height: 72px;
+            background: linear-gradient(135deg, rgba(37,99,235,0.1), rgba(124,58,237,0.1));
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            color: var(--primary-color);
+        }
+        .file-name {
+            font-size: 20px;
+            font-weight: 700;
+            text-align: center;
+            margin-bottom: 8px;
+            word-break: break-all;
+        }
+        .file-meta {
+            color: var(--text-secondary);
+            font-size: 14px;
+            text-align: center;
+            margin-bottom: 28px;
+        }
+        .file-meta span {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .download-btn {
+            display: flex;
+            width: 100%;
+            height: 52px;
+            font-size: 16px;
+            background: linear-gradient(135deg, #2563eb, #7c3aed);
+            border-radius: var(--radius-md);
+            color: white;
+            font-weight: 600;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: opacity 0.2s, transform 0.1s;
+            margin-bottom: 32px;
+        }
+        .download-btn:hover { opacity: 0.9; }
+        .download-btn:active { transform: scale(0.98); }
+        .link-section {
+            border-top: 1px solid var(--border-color);
+            padding-top: 24px;
+        }
+        .link-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .link-row:last-child { margin-bottom: 0; }
+        .link-label {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+    </style>
+</head>
+<body>
+    <div class="share-container">
+        <div class="share-brand">
+            <div class="share-brand-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
             </div>
-            <h1 style="font-size: 20px; font-weight: 700; margin-bottom: 8px; word-break: break-all;">{{ file.filename }}</h1>
-            <p style="color: var(--text-secondary); font-size: 14px;">
-                {{ file.filesize_mb }} MB · {{ file.upload_date_short }}
+            tgState
+        </div>
+
+        <div class="card share-card">
+            <div class="file-icon">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
+            </div>
+            <h1 class="file-name">{{ file.filename }}</h1>
+            <p class="file-meta">
+                <span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    {{ file.filesize_mb }} MB
+                </span>
+                &nbsp;&middot;&nbsp;
+                <span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                    {{ file.upload_date_short }}
+                </span>
             </p>
-            <div style="margin-top: 24px;">
-                <a href="{{ file.file_url }}" class="btn btn-primary" style="padding: 0 32px;">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                    立即下载
-                </a>
+
+            <a href="{{ file.file_url }}" class="download-btn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                立即下载
+            </a>
+
+            <div class="link-section">
+                <div>
+                    <div class="link-label">下载直链</div>
+                    <div class="link-row">
+                        <input type="text" class="input-field" value="{{ file.file_url }}" readonly id="link-url">
+                        <button class="btn btn-secondary" onclick="Utils.copy(document.getElementById('link-url').value)">复制</button>
+                    </div>
+                </div>
+                <div>
+                    <div class="link-label">Markdown</div>
+                    <div class="link-row">
+                        <input type="text" class="input-field" value="{{ file.markdown_code }}" readonly id="link-md">
+                        <button class="btn btn-secondary" onclick="Utils.copy(document.getElementById('link-md').value)">复制</button>
+                    </div>
+                </div>
+                <div>
+                    <div class="link-label">HTML</div>
+                    <div class="link-row">
+                        <input type="text" class="input-field" value="{{ file.html_code }}" readonly id="link-html">
+                        <button class="btn btn-secondary" onclick="Utils.copy(document.getElementById('link-html').value)">复制</button>
+                    </div>
+                </div>
             </div>
         </div>
 
-        <div style="border-top: 1px solid var(--border-color); padding-top: 24px;">
-            <div class="input-group">
-                <label class="input-label">下载直链</label>
-                <div style="display: flex; gap: 8px;">
-                    <input type="text" class="input-field" value="{{ file.file_url }}" readonly>
-                    <button class="btn btn-secondary" onclick="Utils.copy('{{ file.file_url }}')">复制</button>
-                </div>
-            </div>
-            
-            <div class="input-group">
-                <label class="input-label">Markdown 引用</label>
-                <div style="display: flex; gap: 8px;">
-                    <input type="text" class="input-field" value="{{ file.markdown_code }}" readonly>
-                    <button class="btn btn-secondary" onclick="Utils.copy('{{ file.markdown_code }}')">复制</button>
-                </div>
-            </div>
-            
-            <div class="input-group" style="margin-bottom: 0;">
-                <label class="input-label">HTML 引用</label>
-                <div style="display: flex; gap: 8px;">
-                    <input type="text" class="input-field" value="{{ file.html_code }}" readonly>
-                    <button class="btn btn-secondary" onclick="Utils.copy('{{ file.html_code }}')">复制</button>
-                </div>
-            </div>
-        </div>
+        <p style="margin-top: 32px; color: var(--text-tertiary); font-size: 13px;">Powered by Telegram</p>
     </div>
-</div>
-{% endblock %}
+</body>
+</html>

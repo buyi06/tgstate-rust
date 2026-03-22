@@ -6,6 +6,14 @@
     <title>欢迎使用 tgState</title>
     <link rel="stylesheet" href="/static/ui.css">
     <script src="/static/ui.js"></script>
+    <script>
+        (function() {
+            const pref = localStorage.getItem('tgstate_theme_pref') || 'auto';
+            let mode = pref;
+            if (pref === 'auto') mode = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', mode);
+        })();
+    </script>
     <style>
         .welcome-container {
             min-height: 100vh;
@@ -19,14 +27,14 @@
         .hero-logo {
             width: 80px;
             height: 80px;
-            background: var(--primary-color);
+            background: linear-gradient(135deg, #2563eb, #7c3aed);
             border-radius: 24px;
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
             margin-bottom: 32px;
-            box-shadow: var(--shadow-md);
+            box-shadow: 0 8px 32px rgba(37, 99, 235, 0.25);
         }
         .hero-title {
             font-size: 40px;
