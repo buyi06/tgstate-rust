@@ -1,26 +1,27 @@
 :root {
     /* 浅色主题 (默认) */
-    --bg-body: #f7f9fc;
+    --bg-body: #f5f7fa;
     --bg-surface: #ffffff;
-    --bg-surface-hover: #f8f9fa;
-    --text-primary: #1a1a1a;
-    --text-secondary: #666666;
-    --text-tertiary: #999999;
-    --border-color: #e2e8f0;
-    --border-hover: #cbd5e1;
+    --bg-surface-hover: #f0f2f5;
+    --text-primary: #111827;
+    --text-secondary: #4b5563;
+    --text-tertiary: #9ca3af;
+    --border-color: #e5e7eb;
+    --border-hover: #d1d5db;
     --primary-color: #2563eb;
     --primary-hover: #1d4ed8;
     --primary-text: #ffffff;
     --danger-color: #ef4444;
     --danger-bg: #fef2f2;
-    --success-color: #10b981;
+    --success-color: #059669;
     --success-bg: #ecfdf5;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    --radius-md: 12px;
-    --radius-lg: 16px;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+    --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.12);
+    --radius-md: 10px;
+    --radius-lg: 14px;
     --header-height: 64px;
-    --nav-width: 260px; /* PC默认宽度 */
+    --nav-width: 260px;
     --input-height: 44px;
 }
 
@@ -196,7 +197,7 @@ input, select, textarea { font-family: inherit; }
     margin-bottom: 4px;
 }
 .nav-item:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
-.nav-item.active { background: var(--bg-surface-hover); color: var(--primary-color); font-weight: 600; }
+.nav-item.active { background: rgba(37, 99, 235, 0.08); color: var(--primary-color); font-weight: 600; }
 .nav-item svg { width: 20px; height: 20px; }
 
 .card {
@@ -205,11 +206,11 @@ input, select, textarea { font-family: inherit; }
     border: 1px solid var(--border-color);
     padding: 24px;
     box-shadow: var(--shadow-sm);
-    margin-bottom: 24px;
+    margin-bottom: 20px;
     width: 100%;
-    /* 强制内容不撑破 */
     max-width: 100%;
     overflow-wrap: break-word;
+    transition: box-shadow 0.2s;
 }
 @media (max-width: 768px) {
     .card { padding: 16px; }
@@ -225,14 +226,16 @@ input, select, textarea { font-family: inherit; }
     align-items: center;
     justify-content: center;
     gap: 8px;
-    transition: all 0.2s;
+    transition: all 0.15s ease;
     border: 1px solid transparent;
     white-space: nowrap;
     max-width: 100%;
+    cursor: pointer;
 }
-.btn-sm { height: 32px; padding: 0 12px; font-size: 13px; }
-.btn-primary { background: var(--primary-color); color: var(--primary-text); }
-.btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+.btn-sm { height: 34px; padding: 0 14px; font-size: 13px; }
+.btn-primary { background: var(--primary-color); color: var(--primary-text); box-shadow: 0 1px 3px rgba(37, 99, 235, 0.3); }
+.btn-primary:hover:not(:disabled) { background: var(--primary-hover); box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4); transform: translateY(-1px); }
+.btn-primary:active:not(:disabled) { transform: translateY(0); }
 .btn-secondary { background: var(--bg-surface); border-color: var(--border-color); color: var(--text-primary); }
 .btn-secondary:hover:not(:disabled) { background: var(--bg-surface-hover); border-color: var(--border-hover); }
 .btn-ghost { color: var(--text-secondary); }
@@ -241,7 +244,7 @@ input, select, textarea { font-family: inherit; }
 .btn.loading svg { animation: spin 1s linear infinite; }
 
 .input-group { margin-bottom: 20px; width: 100%; }
-.input-label { display: block; font-size: 14px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px; }
+.input-label { display: block; font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.3px; }
 .input-field {
     width: 100%;
     height: var(--input-height);

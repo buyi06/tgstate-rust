@@ -37,88 +37,19 @@
             box-shadow: 0 8px 32px rgba(37, 99, 235, 0.25);
         }
         .hero-title {
-            font-size: 40px;
+            font-size: 36px;
             font-weight: 800;
             color: var(--text-primary);
-            margin: 0 0 16px;
-            letter-spacing: -1px;
+            margin: 0 0 12px;
+            letter-spacing: -0.5px;
         }
         .hero-desc {
-            font-size: 18px;
+            font-size: 16px;
             color: var(--text-secondary);
-            max-width: 500px;
-            margin: 0 auto 48px;
+            max-width: 420px;
+            margin: 0 auto 40px;
             line-height: 1.6;
         }
-        .setup-card {
-            width: 100%;
-            max-width: 480px;
-            padding: 32px;
-            text-align: left;
-        }
-        .step { display: none; }
-        .step.active { display: block; }
-        .step-header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 24px;
-        }
-        .step-badge {
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            background: var(--primary-color);
-            color: white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 14px;
-            font-weight: 700;
-            flex-shrink: 0;
-        }
-        .step-title {
-            font-size: 18px;
-            font-weight: 600;
-        }
-        .step-indicators {
-            display: flex;
-            gap: 8px;
-            justify-content: center;
-            margin-bottom: 32px;
-        }
-        .step-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: var(--border-color);
-            transition: background 0.3s;
-        }
-        .step-dot.active {
-            background: var(--primary-color);
-            width: 24px;
-            border-radius: 4px;
-        }
-        .step-dot.done { background: var(--primary-color); }
-        .btn-row {
-            display: flex;
-            gap: 12px;
-            margin-top: 24px;
-        }
-        .btn-row .btn { flex: 1; }
-        .verify-row {
-            display: flex;
-            gap: 8px;
-            align-items: flex-start;
-        }
-        .verify-row .input-field { flex: 1; }
-        .verify-status {
-            font-size: 13px;
-            margin-top: 4px;
-            display: none;
-        }
-        .verify-status.ok { color: var(--success-color, #10b981); display: block; }
-        .verify-status.err { color: var(--danger-color); display: block; }
     </style>
 </head>
 <body>
@@ -130,229 +61,55 @@
         <h1 class="hero-title">tgState</h1>
         <p class="hero-desc">将 Telegram 变成您的无限私有云存储。</p>
 
-        <div class="step-indicators">
-            <div class="step-dot active" id="dot-1"></div>
-            <div class="step-dot" id="dot-2"></div>
-            <div class="step-dot" id="dot-3"></div>
-        </div>
-
-        <div class="card setup-card">
-            <!-- Step 1: Password -->
-            <div class="step active" id="step-1">
-                <div class="step-header">
-                    <div class="step-badge">1</div>
-                    <div class="step-title">设置管理员密码</div>
-                </div>
+        <div class="card" style="width: 100%; max-width: 400px; padding: 32px; text-align: left;">
+            <h2 style="font-size: 18px; font-weight: 700; margin-bottom: 24px;">初始化设置</h2>
+            <form id="setup-form" onsubmit="return false;">
                 <div class="input-group">
-                    <label class="input-label">密码</label>
+                    <label class="input-label">设置管理员密码</label>
                     <input type="password" class="input-field" id="password" placeholder="请输入强密码" required autofocus>
                     <div class="text-sm text-muted mt-4">此密码将用于登录管理控制台。</div>
                 </div>
-                <div class="btn-row">
-                    <button class="btn btn-primary" onclick="goStep(2)">下一步</button>
-                </div>
-            </div>
-
-            <!-- Step 2: Telegram Config -->
-            <div class="step" id="step-2">
-                <div class="step-header">
-                    <div class="step-badge">2</div>
-                    <div class="step-title">Telegram 配置</div>
-                </div>
-                <div class="input-group">
-                    <label class="input-label">Bot Token</label>
-                    <div class="verify-row">
-                        <input type="text" class="input-field" id="bot_token" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
-                        <button class="btn btn-secondary" onclick="testBot()" id="btn-test-bot" style="white-space:nowrap;">验证</button>
-                    </div>
-                    <div class="text-sm text-muted mt-4">从 <a href="https://t.me/BotFather" target="_blank">@BotFather</a> 获取。</div>
-                    <div class="verify-status" id="bot-status"></div>
-                </div>
-                <div class="input-group">
-                    <label class="input-label">Channel Name</label>
-                    <div class="verify-row">
-                        <input type="text" class="input-field" id="channel_name" placeholder="@my_channel 或 -100xxxxxxxx">
-                        <button class="btn btn-secondary" onclick="testChannel()" id="btn-test-ch" style="white-space:nowrap;">验证</button>
-                    </div>
-                    <div class="text-sm text-muted mt-4">机器人必须是该频道的管理员。</div>
-                    <div class="verify-status" id="ch-status"></div>
-                </div>
-                <div class="btn-row">
-                    <button class="btn btn-secondary" onclick="goStep(1)">上一步</button>
-                    <button class="btn btn-primary" onclick="goStep(3)">下一步</button>
-                </div>
-            </div>
-
-            <!-- Step 3: Optional Settings -->
-            <div class="step" id="step-3">
-                <div class="step-header">
-                    <div class="step-badge">3</div>
-                    <div class="step-title">连接设置（可选）</div>
-                </div>
-                <div class="input-group">
-                    <label class="input-label">Base URL</label>
-                    <div style="display:flex;gap:8px;">
-                        <input type="text" class="input-field" id="base_url" placeholder="http://your-domain.com">
-                        <button class="btn btn-secondary" onclick="document.getElementById('base_url').value=window.location.origin" style="white-space:nowrap;">使用当前</button>
-                    </div>
-                    <div class="text-sm text-muted mt-4">用于生成分享链接。留空则使用默认值。</div>
-                </div>
-                <div class="input-group">
-                    <label class="input-label">PicGo API Key</label>
-                    <div style="display:flex;gap:8px;">
-                        <input type="text" class="input-field" id="picgo_key" placeholder="可选">
-                        <button class="btn btn-secondary" onclick="genKey()" style="white-space:nowrap;">生成</button>
-                    </div>
-                    <div class="text-sm text-muted mt-4">用于 PicGo 图床上传。</div>
-                </div>
-                <div class="btn-row">
-                    <button class="btn btn-secondary" onclick="goStep(2)">上一步</button>
-                    <button class="btn btn-primary" onclick="finishSetup()" id="btn-finish">完成设置</button>
-                </div>
-            </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%; height: 48px; font-size: 15px;" onclick="submitSetup()">
+                    完成设置
+                </button>
+            </form>
         </div>
+
+        <p style="margin-top: 40px; color: var(--text-tertiary); font-size: 13px;">Powered by Telegram</p>
     </div>
 
     <script>
-        let currentStep = 1;
-
-        function goStep(n) {
-            // Validate before advancing
-            if (n > currentStep) {
-                if (currentStep === 1) {
-                    const pwd = document.getElementById('password').value;
-                    if (!pwd) { Toast.show('请输入密码', 'error'); return; }
-                }
-                if (currentStep === 2) {
-                    const token = document.getElementById('bot_token').value.trim();
-                    const channel = document.getElementById('channel_name').value.trim();
-                    if (!token || !channel) { Toast.show('请填写 Bot Token 和 Channel Name', 'error'); return; }
-                }
-            }
-
-            document.getElementById('step-' + currentStep).classList.remove('active');
-            document.getElementById('step-' + n).classList.add('active');
-
-            for (let i = 1; i <= 3; i++) {
-                const dot = document.getElementById('dot-' + i);
-                dot.className = 'step-dot';
-                if (i < n) dot.classList.add('done');
-                if (i === n) dot.classList.add('active');
-            }
-            currentStep = n;
-        }
-
-        async function testBot() {
-            const btn = document.getElementById('btn-test-bot');
-            const status = document.getElementById('bot-status');
-            const token = document.getElementById('bot_token').value.trim();
-            if (!token) { Toast.show('请先填写 Bot Token', 'error'); return; }
-
-            Utils.setLoading(btn, true);
-            try {
-                const res = await fetch('/api/verify/bot', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ BOT_TOKEN: token })
-                });
-                const json = await res.json();
-                if (json.ok) {
-                    status.textContent = '\u2713 @' + json.result.username;
-                    status.className = 'verify-status ok';
-                } else {
-                    status.textContent = '\u2717 ' + (json.message || '验证失败');
-                    status.className = 'verify-status err';
-                }
-            } catch (e) {
-                status.textContent = '\u2717 网络错误';
-                status.className = 'verify-status err';
-            } finally { Utils.setLoading(btn, false); }
-        }
-
-        async function testChannel() {
-            const btn = document.getElementById('btn-test-ch');
-            const status = document.getElementById('ch-status');
-            const token = document.getElementById('bot_token').value.trim();
-            const channel = document.getElementById('channel_name').value.trim();
-            if (!token || !channel) { Toast.show('请先填写 Bot Token 和 Channel Name', 'error'); return; }
-
-            Utils.setLoading(btn, true);
-            try {
-                const res = await fetch('/api/verify/channel', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ BOT_TOKEN: token, CHANNEL_NAME: channel })
-                });
-                const json = await res.json();
-                if (json.available) {
-                    status.textContent = '\u2713 频道可用';
-                    status.className = 'verify-status ok';
-                } else {
-                    status.textContent = '\u2717 ' + (json.message || '频道不可用');
-                    status.className = 'verify-status err';
-                }
-            } catch (e) {
-                status.textContent = '\u2717 网络错误';
-                status.className = 'verify-status err';
-            } finally { Utils.setLoading(btn, false); }
-        }
-
-        function genKey() {
-            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-            let r = '';
-            for (let i = 0; i < 32; i++) r += chars.charAt(Math.floor(Math.random() * chars.length));
-            document.getElementById('picgo_key').value = r;
-        }
-
-        async function finishSetup() {
-            const btn = document.getElementById('btn-finish');
+        async function submitSetup() {
             const pwd = document.getElementById('password').value;
-            const token = document.getElementById('bot_token').value.trim();
-            const channel = document.getElementById('channel_name').value.trim();
-            const baseUrl = document.getElementById('base_url').value.trim();
-            const picgoKey = document.getElementById('picgo_key').value.trim();
+            if (!pwd) { Toast.show('请输入密码', 'error'); return; }
 
-            if (!pwd) { Toast.show('请返回第一步设置密码', 'error'); return; }
-            if (!token || !channel) { Toast.show('请返回第二步填写 Telegram 配置', 'error'); return; }
-
+            const btn = document.querySelector('button[type="submit"]');
             Utils.setLoading(btn, true);
+
             try {
-                // 1. Set password
-                let res = await fetch('/api/set-password', {
+                const res = await fetch('/api/set-password', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ password: pwd })
                 });
-                if (!res.ok) { Toast.show('密码设置失败', 'error'); return; }
+                if (!res.ok) { Toast.show('设置失败', 'error'); return; }
 
-                // 2. Auto login
-                res = await fetch('/api/auth/login', {
+                Toast.show('设置成功，正在登录...');
+
+                const loginRes = await fetch('/api/auth/login', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ password: pwd })
                 });
-                if (!res.ok) { Toast.show('自动登录失败', 'error'); return; }
 
-                // 3. Save & apply config
-                const cfg = { BOT_TOKEN: token, CHANNEL_NAME: channel };
-                if (baseUrl) cfg.BASE_URL = baseUrl;
-                if (picgoKey) cfg.PICGO_API_KEY = picgoKey;
-
-                res = await fetch('/api/app-config/apply', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(cfg)
-                });
-                if (!res.ok) {
-                    const json = await res.json();
-                    Toast.show(json.detail?.message || '配置保存失败', 'error');
-                    return;
+                if (loginRes.ok) {
+                    setTimeout(() => window.location.href = '/', 800);
+                } else {
+                    Toast.show('自动登录失败，请手动登录', 'error');
+                    setTimeout(() => window.location.href = '/login', 1500);
                 }
-
-                Toast.show('设置完成，正在跳转...');
-                setTimeout(() => window.location.href = '/', 1000);
             } catch (e) {
-                Toast.show('网络错误: ' + e.message, 'error');
+                Toast.show('网络错误', 'error');
             } finally {
                 Utils.setLoading(btn, false);
             }

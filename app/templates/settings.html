@@ -3,94 +3,94 @@
 {% block title %}设置 - tgState{% endblock %}
 
 {% block content %}
-<div style="max-width: 800px; margin: 0 auto;">
-    <h1 style="font-size: 24px; font-weight: 700; margin-bottom: 8px;">系统设置</h1>
-    <p style="color: var(--text-secondary); margin-bottom: 32px;">配置 Telegram 机器人与其他系统参数。</p>
+<div style="max-width: 720px; margin: 0 auto;">
+    <div style="margin-bottom: 32px;">
+        <h1 style="font-size: 26px; font-weight: 800; margin-bottom: 6px;">系统设置</h1>
+        <p style="color: var(--text-secondary); font-size: 15px;">配置 Telegram 机器人与其他系统参数。</p>
+    </div>
 
     <form id="settings-form" onsubmit="return false;">
         <!-- 账号安全 -->
-        <div class="card">
-            <h2 style="font-size: 16px; font-weight: 600; margin-bottom: 24px; display: flex; align-items: center; gap: 8px;">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+        <div class="card" style="padding: 28px;">
+            <h2 style="font-size: 15px; font-weight: 700; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary);">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
                 账号安全
             </h2>
-            <div class="input-group">
+            <div class="input-group" style="margin-bottom: 0;">
                 <label class="input-label">管理员密码</label>
                 <div style="position: relative;">
-                    <input type="password" class="input-field" name="PASS_WORD" id="PASS_WORD" placeholder="********">
-                    <button type="button" onclick="togglePwd('PASS_WORD')" style="position: absolute; right: 12px; top: 12px; color: var(--text-tertiary);">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    <input type="password" class="input-field" name="PASS_WORD" id="PASS_WORD" placeholder="留空则不修改">
+                    <button type="button" onclick="togglePwd('PASS_WORD')" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--text-tertiary); padding: 4px;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                     </button>
                 </div>
-                <div class="text-sm text-muted mt-4">留空则不修改当前密码。</div>
             </div>
         </div>
 
         <!-- Telegram 配置 -->
-        <div class="card">
-            <h2 style="font-size: 16px; font-weight: 600; margin-bottom: 24px; display: flex; align-items: center; gap: 8px;">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+        <div class="card" style="padding: 28px;">
+            <h2 style="font-size: 15px; font-weight: 700; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary);">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
                 Telegram 配置
             </h2>
             <div class="input-group">
-                <label class="input-label">Bot Token</label>
-                <input type="text" class="input-field" name="BOT_TOKEN" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
-                <div class="text-sm text-muted mt-4">从 @BotFather 获取的机器人 Token。</div>
+                <label class="input-label">Bot Token <span id="bot-token-badge" class="badge badge-success" style="display:none; margin-left: 8px; font-size: 11px;">已配置</span></label>
+                <input type="text" class="input-field" name="BOT_TOKEN" id="BOT_TOKEN" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+                <div class="text-sm text-muted mt-4">从 <a href="https://t.me/BotFather" target="_blank" style="color: var(--primary-color);">@BotFather</a> 获取。留空则保持当前配置。</div>
             </div>
-            <div class="input-group">
+            <div class="input-group" style="margin-bottom: 0;">
                 <label class="input-label">Channel Name</label>
-                <input type="text" class="input-field" name="CHANNEL_NAME" placeholder="@my_channel 或 -100xxxxxxxx">
+                <input type="text" class="input-field" name="CHANNEL_NAME" id="CHANNEL_NAME" placeholder="@my_channel 或 -100xxxxxxxx">
                 <div class="text-sm text-muted mt-4">机器人必须是该频道的管理员。</div>
             </div>
         </div>
 
         <!-- 连接设置 -->
-        <div class="card">
-            <h2 style="font-size: 16px; font-weight: 600; margin-bottom: 24px; display: flex; align-items: center; gap: 8px;">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+        <div class="card" style="padding: 28px;">
+            <h2 style="font-size: 15px; font-weight: 700; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary);">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
                 连接设置
             </h2>
             <div class="input-group">
                 <label class="input-label">Base URL</label>
                 <div style="display: flex; gap: 8px;">
                     <input type="text" class="input-field" name="BASE_URL" id="BASE_URL" placeholder="http://your-domain.com">
-                    <button type="button" class="btn btn-secondary" onclick="fillOrigin()">使用当前</button>
+                    <button type="button" class="btn btn-secondary" onclick="fillOrigin()" style="flex-shrink: 0;">使用当前</button>
                 </div>
                 <div class="text-sm text-muted mt-4">用于生成分享链接和图片地址。</div>
             </div>
-            <div class="input-group">
-                <label class="input-label">PicGo API Key</label>
+            <div class="input-group" style="margin-bottom: 0;">
+                <label class="input-label">PicGo API Key <span id="picgo-key-badge" class="badge badge-success" style="display:none; margin-left: 8px; font-size: 11px;">已配置</span></label>
                 <div style="display: flex; gap: 8px;">
-                    <input type="text" class="input-field" name="PICGO_API_KEY" id="PICGO_API_KEY" placeholder="可选">
-                    <button type="button" class="btn btn-secondary" onclick="genKey()">生成</button>
+                    <input type="text" class="input-field" name="PICGO_API_KEY" id="PICGO_API_KEY" placeholder="留空则保持当前配置">
+                    <button type="button" class="btn btn-secondary" onclick="genKey()" style="flex-shrink: 0;">生成</button>
                 </div>
-                <div class="text-sm text-muted mt-4">用于配置 PicGo 图床上传。</div>
             </div>
         </div>
 
-        <!-- 维护更新 -->
-        <!-- 自动更新功能已移除，此处保留空位以便未来扩展 -->
-
-        <!-- 高级与保存 -->
-        <div class="flex-between" style="margin-bottom: 32px;">
-            <button class="btn btn-ghost" onclick="toggleAdvanced()">高级选项</button>
+        <!-- 操作按钮 -->
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 24px;">
+            <button type="button" class="btn btn-ghost" onclick="toggleAdvanced()" style="color: var(--text-tertiary);">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82V9"></path></svg>
+                高级选项
+            </button>
             <div style="display: flex; gap: 12px;">
-                <button class="btn btn-secondary" onclick="saveConfig(false)" id="btn-save">仅保存</button>
-                <button class="btn btn-primary" onclick="saveConfig(true)" id="btn-finish">保存并应用</button>
+                <button type="button" class="btn btn-secondary" onclick="saveConfig(false)" id="btn-save">仅保存</button>
+                <button type="button" class="btn btn-primary" onclick="saveConfig(true)" id="btn-finish">保存并应用</button>
             </div>
         </div>
 
         <!-- 高级选项面板 -->
         <div id="advanced-panel" class="hidden" style="margin-bottom: 48px;">
-            <div class="card" style="border-color: var(--border-color);">
-                <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 16px;">连接测试</h3>
+            <div class="card" style="padding: 28px;">
+                <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 16px;">连接测试</h3>
                 <div style="display: flex; gap: 12px; margin-bottom: 24px;">
-                    <button class="btn btn-secondary btn-sm" onclick="testBot()" id="btn-test-bot">测试 Bot Token</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="testBot()" id="btn-test-bot">测试 Bot Token</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="testChannel()" id="btn-test-ch">测试频道</button>
                 </div>
-
-                <div style="border-top: 1px solid var(--border-color); padding-top: 24px; margin-top: 24px;">
-                    <h3 style="font-size: 14px; font-weight: 600; color: var(--danger-color); margin-bottom: 16px;">危险区域</h3>
-                    <button class="btn" style="color: var(--danger-color); border: 1px solid var(--danger-color);" onclick="resetConfig()">重置所有配置</button>
+                <div style="border-top: 1px solid var(--border-color); padding-top: 20px; margin-top: 20px;">
+                    <h3 style="font-size: 14px; font-weight: 700; color: var(--danger-color); margin-bottom: 12px;">危险区域</h3>
+                    <button type="button" class="btn" style="color: var(--danger-color); border: 1px solid var(--danger-color);" onclick="resetConfig()">重置所有配置</button>
                 </div>
             </div>
         </div>
@@ -98,16 +98,28 @@
 </div>
 
 <script>
+let configState = {}; // Store loaded config state
+
 function initData() {
     fetch('/api/app-config')
         .then(r => r.json())
         .then(data => {
-            for (let k in data.cfg) {
-                // 特殊处理密码字段，如果已设置则不显示（为了安全），或者显示占位符
-                if (k === 'PASS_WORD_SET') continue;
-                
-                const el = document.getElementsByName(k)[0];
-                if (el) el.value = data.cfg[k] || '';
+            configState = data.cfg || {};
+            // Populate fields
+            const channelEl = document.getElementsByName('CHANNEL_NAME')[0];
+            if (channelEl) channelEl.value = configState.CHANNEL_NAME || '';
+
+            const baseUrlEl = document.getElementsByName('BASE_URL')[0];
+            if (baseUrlEl) baseUrlEl.value = configState.BASE_URL || '';
+
+            // Show badges for set-but-hidden fields
+            if (configState.BOT_TOKEN_SET) {
+                document.getElementById('bot-token-badge').style.display = 'inline-flex';
+                document.getElementById('BOT_TOKEN').placeholder = '已配置，留空保持不变';
+            }
+            if (configState.PICGO_API_KEY_SET) {
+                document.getElementById('picgo-key-badge').style.display = 'inline-flex';
+                document.getElementById('PICGO_API_KEY').placeholder = '已配置，留空保持不变';
             }
         });
 }
@@ -123,9 +135,9 @@ function fillOrigin() {
 
 function genKey() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let result = '';
-    for (let i = 0; i < 32; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
-    document.getElementById('PICGO_API_KEY').value = result;
+    let r = '';
+    for (let i = 0; i < 32; i++) r += chars.charAt(Math.floor(Math.random() * chars.length));
+    document.getElementById('PICGO_API_KEY').value = r;
 }
 
 function toggleAdvanced() {
@@ -135,13 +147,15 @@ function toggleAdvanced() {
 async function saveConfig(apply = false) {
     const btn = document.getElementById(apply ? 'btn-finish' : 'btn-save');
     Utils.setLoading(btn, true);
-    
+
     const form = document.getElementById('settings-form');
     const data = Object.fromEntries(new FormData(form));
-    
-    // 如果密码为空，从提交数据中移除，避免覆盖为空字符串
+
+    // Don't send empty sensitive fields — keeps existing values in DB
     if (!data.PASS_WORD) delete data.PASS_WORD;
-    
+    if (!data.BOT_TOKEN) delete data.BOT_TOKEN;
+    if (!data.PICGO_API_KEY) delete data.PICGO_API_KEY;
+
     try {
         const url = apply ? '/api/app-config/apply' : '/api/app-config/save';
         const res = await fetch(url, {
@@ -150,13 +164,10 @@ async function saveConfig(apply = false) {
             body: JSON.stringify(data)
         });
         const json = await res.json();
-        
+
         if (res.ok) {
             Toast.show(apply ? '配置已保存并应用' : '配置已保存');
-            if (apply) {
-                // 如果应用成功，可能会涉及到 Bot 重启，等待一下刷新页面状态
-                setTimeout(() => location.reload(), 1000);
-            }
+            if (apply) setTimeout(() => location.reload(), 1000);
         } else {
             Toast.show(json.detail?.message || '保存失败', 'error');
         }
@@ -170,33 +181,49 @@ async function saveConfig(apply = false) {
 async function testBot() {
     const btn = document.getElementById('btn-test-bot');
     Utils.setLoading(btn, true);
-    
-    const form = document.getElementById('settings-form');
-    const data = Object.fromEntries(new FormData(form));
-    
+    const token = document.getElementsByName('BOT_TOKEN')[0].value;
     try {
         const res = await fetch('/api/verify/bot', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ BOT_TOKEN: data.BOT_TOKEN })
+            body: JSON.stringify({ BOT_TOKEN: token || undefined })
         });
         const json = await res.json();
         if (json.ok) {
-            Toast.show(`测试成功: @${json.result.username}`);
+            Toast.show('Bot 验证成功: @' + json.result.username);
         } else {
-            Toast.show(json.message || '连接失败', 'error');
+            Toast.show(json.message || '验证失败', 'error');
         }
     } catch (e) {
-        Toast.show('测试请求失败', 'error');
-    } finally {
-        Utils.setLoading(btn, false);
-    }
+        Toast.show('请求失败', 'error');
+    } finally { Utils.setLoading(btn, false); }
+}
+
+async function testChannel() {
+    const btn = document.getElementById('btn-test-ch');
+    Utils.setLoading(btn, true);
+    const token = document.getElementsByName('BOT_TOKEN')[0].value;
+    const channel = document.getElementsByName('CHANNEL_NAME')[0].value;
+    try {
+        const res = await fetch('/api/verify/channel', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ BOT_TOKEN: token || undefined, CHANNEL_NAME: channel || undefined })
+        });
+        const json = await res.json();
+        if (json.available) {
+            Toast.show('频道验证成功');
+        } else {
+            Toast.show(json.message || '频道不可用', 'error');
+        }
+    } catch (e) {
+        Toast.show('请求失败', 'error');
+    } finally { Utils.setLoading(btn, false); }
 }
 
 async function resetConfig() {
     const confirmed = await Modal.confirm('重置配置', '确定要重置所有配置吗？此操作不可撤销，并将强制退出登录。');
     if (!confirmed) return;
-    
     fetch('/api/reset-config', { method: 'POST' })
         .then(r => r.json())
         .then(() => {
