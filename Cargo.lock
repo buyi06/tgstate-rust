@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "tgstate"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "argon2",
  "async-stream",

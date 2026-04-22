@@ -107,6 +107,18 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
+    // Always-allowed public-content prefixes. These are the visitor-facing
+    // routes: short download links, legacy download links, and share pages.
+    // Shared files are meant to be reachable by guests without an account,
+    // so they must be allowed regardless of whether a password is configured.
+    let public_content_prefixes = [
+        "/d/",
+        "/share/",
+    ];
+    if public_content_prefixes.iter().any(|p| path.starts_with(p)) {
+        return next.run(req).await;
+    }
+
     // Always-allowed API paths (regardless of password state)
     let always_public = ["/api/health"];
     if always_public.iter().any(|p| &path == p || path.starts_with(&format!("{}/", p))) {
