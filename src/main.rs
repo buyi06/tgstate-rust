@@ -108,7 +108,11 @@ async fn main() {
             middleware::security_headers::security_headers_middleware,
         ));
 
-    let addr = "0.0.0.0:8000";
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "8000".into())
+        .parse()
+        .unwrap_or(8000);
+    let addr = format!("0.0.0.0:{}", port);
     tracing::info!("服务器监听: {}", addr);
 
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
