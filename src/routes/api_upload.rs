@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Multipart, State};
 use axum::http::HeaderMap;
@@ -6,6 +6,7 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use bytes::BytesMut;
+use tokio::sync::Semaphore;
 
 use crate::auth::{self, COOKIE_NAME};
 use crate::config;
@@ -271,8 +272,42 @@ async fn upload_file(
     })))
 }
 
-/// Stream file upload: reads multipart field in chunks, uploads each chunk to Telegram
-/// as it reaches TELEGRAM_CHUNK_SIZE. Peak memory is ~1 chunk (~20MB) instead of the full file.
+/// Resolve the max number of chunks uploaded to Telegram concurrently.
+/// Overridable via the `UPLOAD_CONCURRENCY` env var (clamped to 1..=16): higher
+/// values trade memory (≈ value × 19.5MB) for throughput. `1` keeps memory low
+/// while still overlapping reads with a single in-flight upload (pipeline mode).
+fn parse_upload_concurrency(raw: Option<String>, default: usize) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v >= 1 && *v <= 16)
+        .unwrap_or(default)
+}
+
+fn upload_concurrency() -> usize {
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        parse_upload_concurrency(
+            std::env::var("UPLOAD_CONCURRENCY").ok(),
+            constants::MAX_CONCURRENT_CHUNK_UPLOADS,
+        )
+    })
+}
+
+/// Stream a multipart upload to Telegram with **bounded-concurrency** chunking.
+///
+/// The field is read sequentially (the multipart body is a single stream), but
+/// each completed `TELEGRAM_CHUNK_SIZE` chunk is dispatched to a concurrent
+/// upload task. At most `upload_concurrency()` chunks upload at once, so peak
+/// memory is roughly `(concurrency + 1) × ~19.5MB` rather than the whole file.
+/// Reading the next chunk overlaps with uploading in-flight ones — the main win
+/// over the previous fully-serial implementation, which neither overlapped
+/// read-with-upload nor uploaded chunks in parallel.
+///
+/// The first chunk is uploaded synchronously so its `message_id` can anchor the
+/// reply-thread for the remaining chunks and the manifest (purely cosmetic in
+/// the channel; reconstruction relies on the manifest, not the reply chain).
+/// Concurrent completion is out of order, so chunks carry their index and are
+/// re-sorted before the manifest is written. On any failure the chunks that did
+/// upload are best-effort deleted so the channel is not left with orphans.
 async fn stream_upload_to_telegram(
     tg_service: &TelegramService,
     mut field: axum::extract::multipart::Field<'_>,
@@ -280,100 +315,200 @@ async fn stream_upload_to_telegram(
     db_pool: &database::DbPool,
 ) -> Result<String, String> {
     let chunk_size = constants::TELEGRAM_CHUNK_SIZE;
+    let concurrency = upload_concurrency();
     let mut buffer = BytesMut::with_capacity(chunk_size);
     let mut total_size: usize = 0;
-    let mut chunk_ids: Vec<String> = Vec::new();
-    let mut first_message_id: Option<i64> = None;
-    let mut chunk_num: u32 = 0;
 
-    // Read field data incrementally
+    let sem = Arc::new(Semaphore::new(concurrency));
+    // Chunks finished synchronously (currently only the anchor at index 0).
+    let mut results: Vec<(usize, String)> = Vec::new();
+    // Chunks uploading concurrently; each yields (index, "message_id:file_id").
+    let mut tasks: Vec<tokio::task::JoinHandle<Result<(usize, String), String>>> = Vec::new();
+    let mut chunk_index: usize = 0;
+    let mut anchor_id: Option<i64> = None;
+
     while let Ok(Some(bytes)) = field.chunk().await {
         buffer.extend_from_slice(&bytes);
         total_size += bytes.len();
 
-        // When buffer reaches chunk size, send it
         while buffer.len() >= chunk_size {
-            chunk_num += 1;
-            let chunk_data = buffer.split_to(chunk_size).freeze().to_vec();
-            let chunk_name = format!("{}.part{}", filename, chunk_num);
+            let data = buffer.split_to(chunk_size).freeze().to_vec();
+            let idx = chunk_index;
+            chunk_index += 1;
+            let chunk_name = format!("{}.part{}", filename, idx + 1);
 
-            let message = tg_service
-                .send_document_raw(chunk_data, &chunk_name, first_message_id)
-                .await?;
-
-            if first_message_id.is_none() {
-                first_message_id = Some(message.message_id);
+            if idx == 0 {
+                // Anchor: upload synchronously to obtain the reply-thread root.
+                let message = tg_service
+                    .send_document_with_retry(data, &chunk_name, None)
+                    .await?;
+                anchor_id = Some(message.message_id);
+                let doc = message.document.ok_or("No document in chunk response")?;
+                results.push((idx, format!("{}:{}", message.message_id, doc.file_id)));
+            } else {
+                // Acquire the permit BEFORE spawning so no more than
+                // `concurrency` chunks are buffered/in-flight at once. This also
+                // back-pressures the read loop, bounding memory.
+                let permit = sem
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let tg = tg_service.clone();
+                let reply = anchor_id;
+                tasks.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    let message = tg.send_document_with_retry(data, &chunk_name, reply).await?;
+                    let doc = message
+                        .document
+                        .ok_or_else(|| "No document in chunk response".to_string())?;
+                    Ok((idx, format!("{}:{}", message.message_id, doc.file_id)))
+                }));
             }
-
-            let doc = message.document.ok_or("No document in chunk response")?;
-            chunk_ids.push(format!("{}:{}", message.message_id, doc.file_id));
         }
     }
 
-    // Handle remaining data in buffer
-    if buffer.is_empty() && chunk_ids.is_empty() {
-        return Err("文件为空".into());
-    }
-
-    if chunk_ids.is_empty() {
-        // Small file: single upload (no chunks were sent yet)
+    // No full chunk was produced → small (single-shot) file.
+    if chunk_index == 0 {
+        if buffer.is_empty() {
+            return Err("文件为空".into());
+        }
         tracing::info!("直接上传文件: {} ({}字节)", filename, total_size);
         let data = buffer.freeze().to_vec();
-        let message = tg_service.send_document_raw(data, filename, None).await?;
-
+        let message = tg_service
+            .send_document_with_retry(data, filename, None)
+            .await?;
         let doc = message.document.ok_or("No document in response")?;
         let composite_id = format!("{}:{}", message.message_id, doc.file_id);
-
         let short_id =
             database::add_file_metadata(db_pool, filename, &composite_id, total_size as i64)
                 .map_err(|e| e.to_string())?;
         return Ok(short_id);
     }
 
-    // Send remaining buffer as last chunk
+    // Dispatch the trailing partial chunk (if any) as the final chunk.
     if !buffer.is_empty() {
-        chunk_num += 1;
-        let chunk_data = buffer.freeze().to_vec();
-        let chunk_name = format!("{}.part{}", filename, chunk_num);
-
-        let message = tg_service
-            .send_document_raw(chunk_data, &chunk_name, first_message_id)
-            .await?;
-
-        let doc = message
-            .document
-            .ok_or("No document in last chunk response")?;
-        chunk_ids.push(format!("{}:{}", message.message_id, doc.file_id));
+        let data = buffer.freeze().to_vec();
+        let idx = chunk_index;
+        let chunk_name = format!("{}.part{}", filename, idx + 1);
+        let permit = sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| e.to_string())?;
+        let tg = tg_service.clone();
+        let reply = anchor_id;
+        tasks.push(tokio::spawn(async move {
+            let _permit = permit;
+            let message = tg.send_document_with_retry(data, &chunk_name, reply).await?;
+            let doc = message
+                .document
+                .ok_or_else(|| "No document in chunk response".to_string())?;
+            Ok((idx, format!("{}:{}", message.message_id, doc.file_id)))
+        }));
     }
 
-    // Multi-chunk: create and upload manifest
+    // Join all concurrent chunk uploads, capturing the first error if any.
+    let mut first_err: Option<String> = None;
+    for task in tasks {
+        match task.await {
+            Ok(Ok(pair)) => results.push(pair),
+            Ok(Err(e)) => {
+                first_err.get_or_insert(e);
+            }
+            Err(join_err) => {
+                first_err.get_or_insert(format!("上传任务异常: {}", join_err));
+            }
+        }
+    }
+
+    if let Some(e) = first_err {
+        let done: Vec<String> = results.into_iter().map(|(_, c)| c).collect();
+        cleanup_uploaded_chunks(tg_service, &done).await;
+        return Err(e);
+    }
+
+    // Concurrent completion is out of order; restore chunk order for the manifest.
+    let chunk_ids = assemble_ordered_chunk_ids(results);
+
     tracing::info!(
-        "分块上传完成: {} ({}MB, {} 块)",
+        "分块上传完成: {} ({}MB, {} 块, 并发 {})",
         filename,
         total_size / (1024 * 1024),
-        chunk_ids.len()
+        chunk_ids.len(),
+        concurrency
     );
 
+    let manifest = build_blob_manifest(filename, &chunk_ids);
+    let manifest_name = format!("{}.manifest", filename);
+    let manifest_msg = match tg_service
+        .send_document_with_retry(manifest.into_bytes(), &manifest_name, anchor_id)
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            cleanup_uploaded_chunks(tg_service, &chunk_ids).await;
+            return Err(e);
+        }
+    };
+    let manifest_message_id = manifest_msg.message_id;
+    let doc = match manifest_msg.document {
+        Some(d) => d,
+        None => {
+            let _ = tg_service.delete_message(manifest_message_id).await;
+            cleanup_uploaded_chunks(tg_service, &chunk_ids).await;
+            return Err("No document in manifest response".into());
+        }
+    };
+    let manifest_composite = format!("{}:{}", manifest_message_id, doc.file_id);
+
+    match database::add_file_metadata(db_pool, filename, &manifest_composite, total_size as i64) {
+        Ok(short_id) => Ok(short_id),
+        Err(e) => {
+            // DB write failed after everything uploaded — roll back the channel.
+            let _ = tg_service.delete_message(manifest_message_id).await;
+            cleanup_uploaded_chunks(tg_service, &chunk_ids).await;
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Restore ascending chunk order (concurrent uploads finish out of order) and
+/// drop the index, yielding the `"message_id:file_id"` composites for the manifest.
+fn assemble_ordered_chunk_ids(mut results: Vec<(usize, String)>) -> Vec<String> {
+    results.sort_by_key(|(idx, _)| *idx);
+    results.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Build the `tgstate-blob` manifest body: magic line, original filename, then
+/// one `message_id:file_id` per chunk. `serve_file` parses this exact layout.
+fn build_blob_manifest(filename: &str, chunk_ids: &[String]) -> String {
     let mut manifest = String::from("tgstate-blob\n");
     manifest.push_str(filename);
     manifest.push('\n');
-    for cid in &chunk_ids {
+    for cid in chunk_ids {
         manifest.push_str(cid);
         manifest.push('\n');
     }
+    manifest
+}
 
-    let manifest_name = format!("{}.manifest", filename);
-    let message = tg_service
-        .send_document_raw(manifest.into_bytes(), &manifest_name, first_message_id)
-        .await?;
+/// Extract the Telegram message_id from a `"message_id:file_id"` composite.
+fn chunk_message_id(composite: &str) -> Option<i64> {
+    composite
+        .split_once(':')
+        .and_then(|(mid, _)| mid.parse::<i64>().ok())
+}
 
-    let doc = message.document.ok_or("No document in manifest response")?;
-    let manifest_composite = format!("{}:{}", message.message_id, doc.file_id);
-
-    let short_id =
-        database::add_file_metadata(db_pool, filename, &manifest_composite, total_size as i64)
-            .map_err(|e| e.to_string())?;
-    Ok(short_id)
+/// Best-effort deletion of already-uploaded chunks after a failed multi-chunk
+/// upload, so a partial upload does not leave orphaned messages in the channel.
+/// Each entry is a `"message_id:file_id"` composite; only the message_id is used.
+async fn cleanup_uploaded_chunks(tg_service: &TelegramService, composites: &[String]) {
+    for composite in composites {
+        if let Some(mid) = chunk_message_id(composite) {
+            let _ = tg_service.delete_message(mid).await;
+        }
+    }
 }
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -392,6 +527,55 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::util::ServiceExt;
+
+    #[test]
+    fn ordered_chunk_ids_sort_by_index_regardless_of_completion_order() {
+        // Concurrent uploads finish out of order; the manifest must still list
+        // chunks in ascending index order so the download path concatenates
+        // them correctly.
+        let out = super::assemble_ordered_chunk_ids(vec![
+            (2, "30:c".to_string()),
+            (0, "10:a".to_string()),
+            (1, "20:b".to_string()),
+        ]);
+        assert_eq!(
+            out,
+            vec!["10:a".to_string(), "20:b".to_string(), "30:c".to_string()]
+        );
+    }
+
+    #[test]
+    fn blob_manifest_layout_matches_download_parser() {
+        let chunk_ids = vec!["10:a".to_string(), "20:b".to_string()];
+        let manifest = super::build_blob_manifest("my file.bin", &chunk_ids);
+        let lines: Vec<&str> = manifest.lines().collect();
+        assert_eq!(lines[0], "tgstate-blob");
+        assert_eq!(lines[1], "my file.bin");
+        assert_eq!(lines[2..].to_vec(), vec!["10:a", "20:b"]);
+        // serve_file rejects manifests with fewer than 3 lines.
+        assert!(lines.len() >= 3);
+    }
+
+    #[test]
+    fn chunk_message_id_parses_leading_int_before_first_colon() {
+        assert_eq!(super::chunk_message_id("123:ABCdef"), Some(123));
+        assert_eq!(super::chunk_message_id("999"), None); // no colon
+        assert_eq!(super::chunk_message_id("x:y"), None); // non-numeric id
+        assert_eq!(super::chunk_message_id(":abc"), None); // empty message id
+    }
+
+    #[test]
+    fn upload_concurrency_parses_and_clamps_to_1_16() {
+        let d = crate::constants::MAX_CONCURRENT_CHUNK_UPLOADS;
+        assert_eq!(super::parse_upload_concurrency(Some("5".into()), d), 5);
+        assert_eq!(super::parse_upload_concurrency(Some(" 2 ".into()), d), 2);
+        assert_eq!(super::parse_upload_concurrency(Some("1".into()), d), 1);
+        assert_eq!(super::parse_upload_concurrency(Some("16".into()), d), 16);
+        assert_eq!(super::parse_upload_concurrency(Some("0".into()), d), d); // below min
+        assert_eq!(super::parse_upload_concurrency(Some("17".into()), d), d); // above max
+        assert_eq!(super::parse_upload_concurrency(Some("abc".into()), d), d); // non-numeric
+        assert_eq!(super::parse_upload_concurrency(None, d), d); // unset
+    }
 
     fn test_state() -> Arc<AppState> {
         let unique = SystemTime::now()

@@ -1,9 +1,31 @@
+use std::time::Duration;
+
 use reqwest::multipart;
 use serde::Serialize;
 
 use crate::constants;
-use crate::error::AppErrorKind;
 use crate::telegram::types::*;
+
+/// Decide whether a Telegram error response should be retried as rate limiting,
+/// and for how many seconds. Returns `None` when the response is not a 429.
+///
+/// Telegram returns HTTP 429 with `{"error_code":429,"parameters":{"retry_after":N}}`.
+/// We trust either the HTTP status or the body's `error_code`, default to 3s when
+/// `retry_after` is absent, and cap the wait so a buggy/hostile value cannot stall
+/// an upload for minutes.
+fn retry_after_secs(status: u16, body: &serde_json::Value) -> Option<u64> {
+    let is_rate_limited = status == 429 || body["error_code"].as_i64() == Some(429);
+    if !is_rate_limited {
+        return None;
+    }
+    let secs = body
+        .get("parameters")
+        .and_then(|p| p.get("retry_after"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3)
+        .min(60);
+    Some(secs)
+}
 
 #[derive(Clone)]
 pub struct TelegramService {
@@ -69,47 +91,99 @@ impl TelegramService {
         Ok(None)
     }
 
-    async fn send_document(
+    /// Upload a document to the channel, retrying on transient network errors
+    /// and Telegram 429 rate limiting (honoring `parameters.retry_after`).
+    ///
+    /// The byte buffer is cloned per attempt; retries are the exception, and a
+    /// ~20MB memcpy is negligible next to the network upload it guards. This is
+    /// the single entry point used by the (now concurrent) chunked uploader, so
+    /// every chunk gets uniform retry/back-off behavior.
+    pub async fn send_document_with_retry(
         &self,
         file_bytes: Vec<u8>,
         filename: &str,
         reply_to: Option<i64>,
-    ) -> Result<Message, AppErrorKind> {
+    ) -> Result<Message, String> {
+        let max_attempts = constants::TG_UPLOAD_MAX_RETRIES.max(1);
         let mime_type = mime_guess::from_path(filename)
             .first_or_octet_stream()
             .to_string();
-        let part = multipart::Part::bytes(file_bytes)
-            .file_name(filename.to_string())
-            .mime_str(&mime_type)
-            .map_err(|e| AppErrorKind::Telegram(format!("Invalid MIME type: {}", e)))?;
-        let form = multipart::Form::new()
-            .text("chat_id", self.channel_name.clone())
-            .part("document", part);
 
-        let form = if let Some(reply_id) = reply_to {
-            form.text("reply_to_message_id", reply_id.to_string())
-        } else {
-            form
-        };
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
 
-        let resp = self
-            .client
-            .post(&self.api_url("sendDocument"))
-            .multipart(form)
-            .send()
-            .await?;
+            let part = multipart::Part::bytes(file_bytes.clone())
+                .file_name(filename.to_string())
+                .mime_str(&mime_type)
+                .map_err(|e| format!("Invalid MIME type: {}", e))?;
+            let mut form = multipart::Form::new()
+                .text("chat_id", self.channel_name.clone())
+                .part("document", part);
+            if let Some(reply_id) = reply_to {
+                form = form.text("reply_to_message_id", reply_id.to_string());
+            }
 
-        let data: TelegramResponse<Message> = resp
-            .json()
-            .await?;
+            let resp = match self
+                .client
+                .post(&self.api_url("sendDocument"))
+                .multipart(form)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt < max_attempts {
+                        tracing::warn!(
+                            "sendDocument 网络错误，2s 后重试 ({}/{}): {}",
+                            attempt,
+                            max_attempts,
+                            e
+                        );
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    return Err(format!("sendDocument request failed: {}", e));
+                }
+            };
 
-        if data.ok {
-            data.result.ok_or_else(|| AppErrorKind::Telegram("No result in response".into()))
-        } else {
-            Err(AppErrorKind::Telegram(format!(
-                "sendDocument error: {}",
-                data.description.unwrap_or_default()
-            )))
+            let status = resp.status();
+            let data: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    if attempt < max_attempts {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    return Err(format!("Parse error: {}", e));
+                }
+            };
+
+            if data["ok"].as_bool() == Some(true) {
+                let result = data
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                return serde_json::from_value::<Message>(result)
+                    .map_err(|e| format!("Decode message error: {}", e));
+            }
+
+            // Retry on Telegram throttling (HTTP 429), honoring retry_after.
+            if let Some(wait) = retry_after_secs(status.as_u16(), &data) {
+                if attempt < max_attempts {
+                    tracing::warn!(
+                        "Telegram 限流(429)，{}s 后重试 ({}/{})",
+                        wait,
+                        attempt,
+                        max_attempts
+                    );
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                    continue;
+                }
+            }
+
+            let desc = data["description"].as_str().unwrap_or("unknown error");
+            return Err(format!("sendDocument error: {}", desc));
         }
     }
 
@@ -232,18 +306,6 @@ impl TelegramService {
         result
     }
 
-    /// Public version of send_document for streaming upload (returns String errors)
-    pub async fn send_document_raw(
-        &self,
-        file_bytes: Vec<u8>,
-        filename: &str,
-        reply_to: Option<i64>,
-    ) -> Result<Message, String> {
-        self.send_document(file_bytes, filename, reply_to)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
     pub async fn try_get_manifest_original_filename(
         &self,
         manifest_file_id: &str,
@@ -274,5 +336,47 @@ impl TelegramService {
         }
 
         Ok(lines[1].to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_after_secs;
+    use serde_json::json;
+
+    #[test]
+    fn retry_after_uses_telegram_parameter() {
+        let body = json!({
+            "ok": false,
+            "error_code": 429,
+            "description": "Too Many Requests: retry after 5",
+            "parameters": { "retry_after": 5 }
+        });
+        assert_eq!(retry_after_secs(429, &body), Some(5));
+    }
+
+    #[test]
+    fn retry_after_defaults_to_3s_when_missing_but_rate_limited() {
+        let body = json!({ "ok": false, "error_code": 429, "description": "Too Many Requests" });
+        assert_eq!(retry_after_secs(429, &body), Some(3));
+    }
+
+    #[test]
+    fn retry_after_detects_429_from_body_even_when_status_differs() {
+        // A proxy may rewrite the HTTP status; the JSON error_code is enough.
+        let body = json!({ "ok": false, "error_code": 429, "parameters": { "retry_after": 10 } });
+        assert_eq!(retry_after_secs(200, &body), Some(10));
+    }
+
+    #[test]
+    fn retry_after_is_capped_at_60s() {
+        let body = json!({ "ok": false, "error_code": 429, "parameters": { "retry_after": 120 } });
+        assert_eq!(retry_after_secs(429, &body), Some(60));
+    }
+
+    #[test]
+    fn retry_after_none_for_non_rate_limited_errors() {
+        let body = json!({ "ok": false, "error_code": 400, "description": "Bad Request: chat not found" });
+        assert_eq!(retry_after_secs(400, &body), None);
     }
 }

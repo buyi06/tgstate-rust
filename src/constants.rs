@@ -53,3 +53,14 @@ pub const BOT_POLL_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum number of file IDs accepted in a single batch-delete request.
 pub const BATCH_DELETE_MAX: usize = 100;
+
+/// Default number of file chunks uploaded to Telegram concurrently during a
+/// single multi-chunk upload. Overridable at runtime via `UPLOAD_CONCURRENCY`.
+/// Peak upload memory is roughly `(value + 1) × TELEGRAM_CHUNK_SIZE`, so the
+/// default of 3 costs ~80MB in exchange for ~3× the serial upload throughput
+/// whenever the bottleneck is the server→Telegram link rather than ingress.
+pub const MAX_CONCURRENT_CHUNK_UPLOADS: usize = 3;
+
+/// Max attempts for a single Telegram `sendDocument` (initial try + retries),
+/// used to ride out transient network errors and HTTP 429 rate limiting.
+pub const TG_UPLOAD_MAX_RETRIES: u32 = 4;
