@@ -2,89 +2,53 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>欢迎使用 tgState</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>欢迎 · tgState</title>
     <link rel="stylesheet" href="/static/ui.css">
-    <script src="/static/ui.js"></script>
-    <script>
-        (function() {
-            const pref = localStorage.getItem('tgstate_theme_pref') || 'auto';
-            let mode = pref;
-            if (pref === 'auto') mode = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-            document.documentElement.setAttribute('data-theme', mode);
-        })();
-    </script>
+    <script>(function(){var p=localStorage.getItem('tgstate_theme_pref')||'dark';var m=p==='auto'?(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):p;document.documentElement.setAttribute('data-theme',m);})();</script>
 </head>
 <body>
-    <div class="standalone-page">
-        <div class="bg-orbs">
-            <div class="bg-orb bg-orb-1"></div>
-            <div class="bg-orb bg-orb-2"></div>
-            <div class="bg-orb bg-orb-3"></div>
+<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+<div class="center-page">
+    <div class="center-card">
+        <div class="brand-lg">
+            <span class="logo-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg></span>
+            tgState
         </div>
-
-        <div style="text-align: center; width: 100%; max-width: 420px; position: relative; z-index: 1;">
-            <div class="standalone-icon" style="width:80px;height:80px;border-radius:24px;margin-bottom:32px;">
-                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-            </div>
-
-            <h1 class="standalone-title" style="font-size:36px;">tgState</h1>
-            <p class="standalone-subtitle" style="max-width:420px;margin:0 auto 40px;">将 Telegram 变成您的无限私有云存储。</p>
-
-            <div class="standalone-card" style="text-align: left;">
-                <h2 style="font-size: 18px; font-weight: 700; margin-bottom: 24px;">初始化设置</h2>
-                <form id="setup-form" onsubmit="return false;">
-                    <div class="input-group">
-                        <label class="input-label">设置管理员密码</label>
-                        <input type="password" class="input-field" id="password" placeholder="请输入强密码" required autofocus>
-                        <div class="text-sm text-muted mt-4">此密码将用于登录管理控制台。</div>
-                    </div>
-                    <button type="submit" class="btn btn-primary" style="width: 100%; height: 48px; font-size: 15px;" onclick="submitSetup()">
-                        完成设置
-                    </button>
-                </form>
-            </div>
-
-            <p class="powered-by" style="margin-top:40px;">Powered by Telegram</p>
+        <div class="panel">
+            <div class="panel-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg></div>
+            <h1>欢迎使用</h1>
+            <p class="lead">将 Telegram 变成你的无限私有云。先设置一个管理员密码。</p>
+            <form id="setup-form" onsubmit="return false;" style="margin-top:24px;">
+                <div class="field">
+                    <label class="field-label">管理员密码</label>
+                    <input type="password" class="input" id="password" placeholder="设置一个强密码" required autofocus>
+                    <div class="field-hint">用于登录管理控制台。</div>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block" id="setup-btn" style="margin-top:18px;">完成设置</button>
+            </form>
         </div>
+        <p class="powered">Powered by Telegram</p>
     </div>
-
-    <script>
-        async function submitSetup() {
-            const pwd = document.getElementById('password').value;
-            if (!pwd) { Toast.show('请输入密码', 'error'); return; }
-
-            const btn = document.querySelector('button[type="submit"]');
-            Utils.setLoading(btn, true);
-
-            try {
-                const res = await fetch('/api/set-password', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ password: pwd })
-                });
-                if (!res.ok) { Toast.show('设置失败', 'error'); return; }
-
-                Toast.show('设置成功，正在登录...');
-
-                const loginRes = await fetch('/api/auth/login', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ password: pwd })
-                });
-
-                if (loginRes.ok) {
-                    setTimeout(() => window.location.href = '/', 800);
-                } else {
-                    Toast.show('自动登录失败，请手动登录', 'error');
-                    setTimeout(() => window.location.href = '/login', 1500);
-                }
-            } catch (e) {
-                Toast.show('网络错误', 'error');
-            } finally {
-                Utils.setLoading(btn, false);
-            }
-        }
-    </script>
+</div>
+<script src="/static/ui.js"></script>
+<script>
+    function submitSetup() {
+        var pwd = document.getElementById('password').value;
+        if (!pwd) { Toast.show('请输入密码', 'error'); return; }
+        var btn = document.getElementById('setup-btn');
+        Utils.setLoading(btn, true);
+        fetch('/api/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) })
+            .then(function (res) {
+                if (!res.ok) { Toast.show('设置失败', 'error'); Utils.setLoading(btn, false); return; }
+                Toast.show('设置成功，正在登录…');
+                return fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) })
+                    .then(function (login) { setTimeout(function () { window.location.href = login.ok ? '/' : '/login'; }, 800); });
+            })
+            .catch(function () { Toast.show('网络错误', 'error'); Utils.setLoading(btn, false); });
+    }
+    document.getElementById('setup-btn').addEventListener('click', submitSetup);
+    document.getElementById('password').addEventListener('keydown', function (e) { if (e.key === 'Enter') submitSetup(); });
+</script>
 </body>
 </html>

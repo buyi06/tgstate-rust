@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use futures::StreamExt;
+use futures::stream::{self, StreamExt};
 use serde::Deserialize;
 
 use crate::config;
@@ -23,6 +23,11 @@ pub struct DownloadQuery {
 #[derive(Deserialize)]
 pub struct BatchDeleteRequest {
     file_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SharePasswordRequest {
+    password: String,
 }
 
 fn get_telegram_service(state: &AppState) -> Result<TelegramService, impl IntoResponse> {
@@ -51,6 +56,12 @@ fn get_telegram_service(state: &AppState) -> Result<TelegramService, impl IntoRe
         channel,
         state.http_client.clone(),
     ))
+}
+
+/// 下载标识符的基本校验：非空、限长、无控制字符。短链、复合 file_id、旧版直链
+/// 都先过这里，挡掉畸形输入。
+fn invalid_identifier(s: &str) -> bool {
+    s.is_empty() || s.len() > 128 || s.chars().any(|c| c.is_control() || c == '\0')
 }
 
 fn guess_content_type(filename: &str) -> String {
@@ -90,6 +101,7 @@ fn content_disposition(filename: &str, force_download: bool) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn chunk_download_failed_response(chunk_id: &str) -> Response {
     // Log the chunk_id for operators; do NOT include it in the response body
     // because it reveals internal manifest structure to clients.
@@ -217,68 +229,57 @@ async fn serve_file(
                 .unwrap();
         }
 
-        let mut chunk_urls = Vec::with_capacity(chunk_ids.len());
-        for chunk_composite in &chunk_ids {
-            let real_id = if let Some(pos) = chunk_composite.find(':') {
-                chunk_composite[pos + 1..].to_string()
-            } else {
-                chunk_composite.clone()
-            };
-
-            let url = match tg_service.get_download_url(&real_id).await {
-                Ok(Some(u)) => u,
-                _ => return chunk_download_failed_response(chunk_composite),
-            };
-            chunk_urls.push((chunk_composite.clone(), url));
-        }
-
-        // Stream chunks with retry
+        // 并发预取：每个 chunk 的 getFile + 建连在前一个 chunk 仍在传输时就发起，最多
+        // PREFETCH 个在途；body 仍按 chunk 顺序流式输出（保序），单块不整体进内存。相比
+        // 旧的“逐块串行 getFile + 串行下载”，块间往返被重叠掉，明显提速。
+        const PREFETCH: usize = 3;
         let tg = tg_service.clone();
         let http = client.clone();
-        let stream = async_stream::stream! {
-            for (chunk_composite, url) in chunk_urls {
-                let resp = match http.get(&url).send().await {
-                    Ok(r) if r.status().is_success() => r,
-                    _ => {
-                        // Retry once after 1 second
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        let real_id = if let Some(pos) = chunk_composite.find(':') {
-                            chunk_composite[pos + 1..].to_string()
-                        } else {
-                            chunk_composite.clone()
-                        };
-                        let retry_url = match tg.get_download_url(&real_id).await {
-                            Ok(Some(u)) => u,
-                            _ => {
-                                yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(format!(
-                                    "Failed to refresh chunk URL: {}",
-                                    chunk_composite
-                                )));
-                                return;
-                            }
-                        };
-                        match http.get(&retry_url).send().await {
-                            Ok(r) if r.status().is_success() => r,
-                            _ => {
-                                yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(format!(
-                                    "Chunk download retry failed: {}",
-                                    chunk_composite
-                                )));
-                                return;
+        let body_stream = async_stream::stream! {
+            let mut fetches = Box::pin(stream::iter(chunk_ids.into_iter().map(|composite| {
+                let tg = tg.clone();
+                let http = http.clone();
+                async move {
+                    let real_id = match composite.split_once(':') {
+                        Some((_, b)) => b.to_string(),
+                        None => composite.clone(),
+                    };
+                    // 取下载 URL 并发起 GET；失败重试一次（刷新 URL）。
+                    for attempt in 0..2 {
+                        if let Ok(Some(url)) = tg.get_download_url(&real_id).await {
+                            if let Ok(resp) = http.get(&url).send().await {
+                                if resp.status().is_success() {
+                                    return Some(resp);
+                                }
                             }
                         }
+                        if attempt == 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                    None
+                }
+            }))
+            .buffered(PREFETCH));
+
+            while let Some(maybe_resp) = fetches.next().await {
+                let resp = match maybe_resp {
+                    Some(r) => r,
+                    None => {
+                        yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(
+                            "chunk download failed".to_string(),
+                        ));
+                        return;
                     }
                 };
-
-                let mut stream = resp.bytes_stream();
-                while let Some(chunk) = stream.next().await {
+                let mut bs = resp.bytes_stream();
+                while let Some(chunk) = bs.next().await {
                     match chunk {
                         Ok(bytes) => yield Ok::<_, std::io::Error>(bytes),
                         Err(e) => {
-                            yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(format!(
-                                "Chunk stream error for {}: {}",
-                                chunk_composite, e
-                            )));
+                            yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(
+                                format!("chunk stream error: {}", e),
+                            ));
                             return;
                         }
                     }
@@ -291,7 +292,7 @@ async fn serve_file(
             .header("Content-Disposition", cd)
             .header("Accept-Ranges", "bytes")
             .header("X-Content-Type-Options", "nosniff")
-            .body(Body::from_stream(stream))
+            .body(Body::from_stream(body_stream))
             .unwrap();
     }
 
@@ -378,10 +379,7 @@ async fn download_file_short(
     headers: HeaderMap,
 ) -> Response {
     // Validate identifier format
-    if identifier.is_empty()
-        || identifier.len() > 128
-        || identifier.chars().any(|c| c.is_control() || c == '\0')
-    {
+    if invalid_identifier(&identifier) {
         return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
     }
 
@@ -393,6 +391,14 @@ async fn download_file_short(
     let meta = database::get_file_by_id(&state.db_pool, &identifier);
     match meta {
         Ok(Some(f)) => {
+            if let Some(ref hash) = f.share_password {
+                let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok());
+                let id_for_cookie = f.short_id.as_deref().unwrap_or(&f.file_id);
+                if !crate::auth::share_unlocked(cookie_header, id_for_cookie, hash) {
+                    return http_error(StatusCode::UNAUTHORIZED, "需要分享密码", "share_locked")
+                        .into_response();
+                }
+            }
             let force_download = query
                 .download
                 .as_deref()
@@ -419,6 +425,9 @@ async fn download_file_short_head(
     Query(query): Query<DownloadQuery>,
     headers: HeaderMap,
 ) -> Response {
+    if invalid_identifier(&identifier) {
+        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
+    }
     let tg_service = match get_telegram_service(&state) {
         Ok(s) => s,
         Err(e) => return e.into_response(),
@@ -427,6 +436,14 @@ async fn download_file_short_head(
     let meta = database::get_file_by_id(&state.db_pool, &identifier);
     match meta {
         Ok(Some(f)) => {
+            if let Some(ref hash) = f.share_password {
+                let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok());
+                let id_for_cookie = f.short_id.as_deref().unwrap_or(&f.file_id);
+                if !crate::auth::share_unlocked(cookie_header, id_for_cookie, hash) {
+                    return http_error(StatusCode::UNAUTHORIZED, "需要分享密码", "share_locked")
+                        .into_response();
+                }
+            }
             let force_download = query
                 .download
                 .as_deref()
@@ -452,6 +469,9 @@ async fn download_file_legacy(
     Query(query): Query<DownloadQuery>,
     headers: HeaderMap,
 ) -> Response {
+    if invalid_identifier(&file_id) {
+        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
+    }
     let tg_service = match get_telegram_service(&state) {
         Ok(s) => s,
         Err(e) => return e.into_response(),
@@ -479,6 +499,9 @@ async fn download_file_legacy_head(
     Query(query): Query<DownloadQuery>,
     headers: HeaderMap,
 ) -> Response {
+    if invalid_identifier(&file_id) {
+        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
+    }
     let tg_service = match get_telegram_service(&state) {
         Ok(s) => s,
         Err(e) => return e.into_response(),
@@ -502,7 +525,21 @@ async fn download_file_legacy_head(
 
 async fn get_files_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let files = database::get_all_files(&state.db_pool).unwrap_or_default();
-    Json(files)
+    // 只暴露“是否有分享密码”这个布尔，绝不把 share_password 哈希发给前端。
+    let out: Vec<serde_json::Value> = files
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "filename": f.filename,
+                "file_id": f.file_id,
+                "filesize": f.filesize,
+                "upload_date": f.upload_date,
+                "short_id": f.short_id,
+                "has_password": f.share_password.is_some(),
+            })
+        })
+        .collect();
+    Json(out)
 }
 
 async fn delete_file(
@@ -619,11 +656,59 @@ async fn batch_delete_files(
     .into_response()
 }
 
+/// 设置 / 清除某个文件的分享密码（管理员操作，受 session 保护）。空密码表示清除。
+async fn set_share_password(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+    Json(payload): Json<SharePasswordRequest>,
+) -> Response {
+    let pw = payload.password.trim().to_string();
+    let has_pw = !pw.is_empty();
+
+    let result = if !has_pw {
+        database::set_share_password(&state.db_pool, &file_id, None)
+    } else {
+        // argon2 哈希是 CPU 密集型，放到阻塞线程池。
+        let hashed = match tokio::task::spawn_blocking(move || crate::auth::hash_password(&pw)).await
+        {
+            Ok(Ok(h)) => h,
+            _ => {
+                return http_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "密码哈希失败",
+                    "hash_error",
+                )
+                .into_response()
+            }
+        };
+        database::set_share_password(&state.db_pool, &file_id, Some(&hashed))
+    };
+
+    match result {
+        Ok(true) => Json(serde_json::json!({
+            "status": "ok",
+            "has_password": has_pw,
+        }))
+        .into_response(),
+        Ok(false) => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+        Err(e) => {
+            tracing::error!("设置分享密码失败: {}", e);
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, "操作失败", "db_error").into_response()
+        }
+    }
+}
+
+async fn health_check() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/health", get(health_check))
         .route("/api/files", get(get_files_list))
         .route("/api/files/:file_id", delete(delete_file))
         .route("/api/batch_delete", post(batch_delete_files))
+        .route("/api/files/:file_id/share-password", post(set_share_password))
         .route(
             "/d/:file_id/:filename",
             get(download_file_legacy).head(download_file_legacy_head),

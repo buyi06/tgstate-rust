@@ -38,7 +38,8 @@ pub fn init_db(data_dir: &str) -> DbPool {
             file_id TEXT NOT NULL UNIQUE,
             filesize INTEGER NOT NULL,
             upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            short_id TEXT UNIQUE
+            short_id TEXT UNIQUE,
+            share_password TEXT
         );",
     )
     .expect("Failed to create files table");
@@ -54,6 +55,20 @@ pub fn init_db(data_dir: &str) -> DbPool {
         tracing::info!("Migrating database: adding short_id column...");
         if let Err(e) = conn.execute("ALTER TABLE files ADD COLUMN short_id TEXT", []) {
             tracing::error!("Migration warning: Failed to add short_id column: {}", e);
+        }
+    }
+
+    // Migration: per-file share password (argon2 hash, nullable).
+    let has_share_password: bool = conn
+        .prepare("PRAGMA table_info(files)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .any(|col| col.map_or(false, |c| c == "share_password"));
+    if !has_share_password {
+        tracing::info!("Migrating database: adding share_password column...");
+        if let Err(e) = conn.execute("ALTER TABLE files ADD COLUMN share_password TEXT", []) {
+            tracing::error!("Migration warning: Failed to add share_password column: {}", e);
         }
     }
 
@@ -73,7 +88,6 @@ pub fn init_db(data_dir: &str) -> DbPool {
             bot_token TEXT,
             channel_name TEXT,
             pass_word TEXT,
-            picgo_api_key TEXT,
             base_url TEXT
         );",
     )
@@ -185,13 +199,16 @@ pub struct FileMetadata {
     pub filesize: i64,
     pub upload_date: String,
     pub short_id: Option<String>,
+    // 分享密码的 argon2 哈希；绝不序列化给前端（只暴露 has_password 布尔）。
+    #[serde(skip_serializing)]
+    pub share_password: Option<String>,
 }
 
 pub fn get_all_files(pool: &DbPool) -> Result<Vec<FileMetadata>, AppErrorKind> {
     let conn = pool.get()?;
     let mut stmt = conn
         .prepare(
-            "SELECT filename, file_id, filesize, upload_date, short_id FROM files ORDER BY upload_date DESC",
+            "SELECT filename, file_id, filesize, upload_date, short_id, share_password FROM files ORDER BY upload_date DESC",
         )?;
 
     let files = stmt
@@ -202,6 +219,7 @@ pub fn get_all_files(pool: &DbPool) -> Result<Vec<FileMetadata>, AppErrorKind> {
                 filesize: row.get(2)?,
                 upload_date: row.get::<_, String>(3).unwrap_or_default(),
                 short_id: row.get(4).ok(),
+                share_password: row.get(5).ok(),
             })
         })?
         .filter_map(|r| r.ok())
@@ -213,7 +231,7 @@ pub fn get_all_files(pool: &DbPool) -> Result<Vec<FileMetadata>, AppErrorKind> {
 pub fn get_file_by_id(pool: &DbPool, identifier: &str) -> Result<Option<FileMetadata>, AppErrorKind> {
     let conn = pool.get()?;
     let result = conn.query_row(
-        "SELECT filename, filesize, upload_date, file_id, short_id FROM files WHERE short_id = ?1 OR file_id = ?1",
+        "SELECT filename, filesize, upload_date, file_id, short_id, share_password FROM files WHERE short_id = ?1 OR file_id = ?1",
         params![identifier],
         |row| {
             Ok(FileMetadata {
@@ -222,6 +240,7 @@ pub fn get_file_by_id(pool: &DbPool, identifier: &str) -> Result<Option<FileMeta
                 upload_date: row.get::<_, String>(2).unwrap_or_default(),
                 file_id: row.get(3)?,
                 short_id: row.get(4).ok(),
+                share_password: row.get(5).ok(),
             })
         },
     );
@@ -237,6 +256,21 @@ pub fn delete_file_metadata(pool: &DbPool, file_id: &str) -> Result<bool, AppErr
     let conn = pool.get()?;
     let rows = conn
         .execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+    Ok(rows > 0)
+}
+
+/// 设置/清除某个文件的分享密码（传入已哈希的值，`None` 表示清除）。
+/// identifier 可以是 short_id 或复合 file_id。返回是否命中了某一行。
+pub fn set_share_password(
+    pool: &DbPool,
+    identifier: &str,
+    hashed: Option<&str>,
+) -> Result<bool, AppErrorKind> {
+    let conn = pool.get()?;
+    let rows = conn.execute(
+        "UPDATE files SET share_password = ?1 WHERE short_id = ?2 OR file_id = ?2",
+        params![hashed, identifier],
+    )?;
     Ok(rows > 0)
 }
 
@@ -269,16 +303,15 @@ pub fn get_app_settings_from_db(
 ) -> Result<HashMap<String, Option<String>>, AppErrorKind> {
     let conn = pool.get()?;
     let result = conn.query_row(
-        "SELECT bot_token, channel_name, pass_word, picgo_api_key, base_url, session_token FROM app_settings WHERE id = 1",
+        "SELECT bot_token, channel_name, pass_word, base_url, session_token FROM app_settings WHERE id = 1",
         [],
         |row| {
             let mut map = HashMap::new();
             map.insert("BOT_TOKEN".to_string(), row.get::<_, Option<String>>(0)?);
             map.insert("CHANNEL_NAME".to_string(), row.get::<_, Option<String>>(1)?);
             map.insert("PASS_WORD".to_string(), row.get::<_, Option<String>>(2)?);
-            map.insert("PICGO_API_KEY".to_string(), row.get::<_, Option<String>>(3)?);
-            map.insert("BASE_URL".to_string(), row.get::<_, Option<String>>(4)?);
-            map.insert("SESSION_TOKEN".to_string(), row.get::<_, Option<String>>(5)?);
+            map.insert("BASE_URL".to_string(), row.get::<_, Option<String>>(3)?);
+            map.insert("SESSION_TOKEN".to_string(), row.get::<_, Option<String>>(4)?);
             Ok(map)
         },
     );
@@ -301,12 +334,11 @@ pub fn save_app_settings_to_db(
 ) -> Result<(), AppErrorKind> {
     let conn = pool.get()?;
     conn.execute(
-        "UPDATE app_settings SET bot_token = ?1, channel_name = ?2, pass_word = ?3, picgo_api_key = ?4, base_url = ?5, session_token = ?6 WHERE id = 1",
+        "UPDATE app_settings SET bot_token = ?1, channel_name = ?2, pass_word = ?3, base_url = ?4, session_token = ?5 WHERE id = 1",
         params![
             norm(payload.get("BOT_TOKEN").and_then(|v| v.as_deref())),
             norm(payload.get("CHANNEL_NAME").and_then(|v| v.as_deref())),
             norm(payload.get("PASS_WORD").and_then(|v| v.as_deref())),
-            norm(payload.get("PICGO_API_KEY").and_then(|v| v.as_deref())),
             norm(payload.get("BASE_URL").and_then(|v| v.as_deref())),
             norm(payload.get("SESSION_TOKEN").and_then(|v| v.as_deref())),
         ],
@@ -319,7 +351,6 @@ pub fn reset_app_settings_in_db(pool: &DbPool) -> Result<(), AppErrorKind> {
     payload.insert("BOT_TOKEN".to_string(), None);
     payload.insert("CHANNEL_NAME".to_string(), None);
     payload.insert("PASS_WORD".to_string(), None);
-    payload.insert("PICGO_API_KEY".to_string(), None);
     payload.insert("BASE_URL".to_string(), None);
     payload.insert("SESSION_TOKEN".to_string(), None);
     save_app_settings_to_db(pool, &payload)

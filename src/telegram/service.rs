@@ -66,6 +66,17 @@ impl TelegramService {
         )
     }
 
+    /// 从错误信息里抹掉 bot token。reqwest 的错误 `Display` 会带上含 token 的
+    /// 完整请求 URL（token 在 path 中，不会被 reqwest 自动脱敏），直接记日志或
+    /// 回传给上层会泄漏 bot 凭据。所有可能包含 reqwest 错误的字符串都过一遍。
+    fn scrub(&self, s: String) -> String {
+        if self.bot_token.is_empty() {
+            s
+        } else {
+            s.replace(&self.bot_token, "<token>")
+        }
+    }
+
     pub async fn get_download_url(&self, file_id: &str) -> Result<Option<String>, String> {
         let url = self.api_url("getFile");
         let resp = self
@@ -75,7 +86,7 @@ impl TelegramService {
             .timeout(std::time::Duration::from_secs(constants::HTTP_TIMEOUT_METADATA_SECS))
             .send()
             .await
-            .map_err(|e| format!("getFile request failed: {}", e))?;
+            .map_err(|e| self.scrub(format!("getFile request failed: {}", e)))?;
 
         let data: TelegramResponse<TelegramFile> =
             resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
@@ -138,12 +149,12 @@ impl TelegramService {
                             "sendDocument 网络错误，2s 后重试 ({}/{}): {}",
                             attempt,
                             max_attempts,
-                            e
+                            self.scrub(e.to_string())
                         );
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         continue;
                     }
-                    return Err(format!("sendDocument request failed: {}", e));
+                    return Err(self.scrub(format!("sendDocument request failed: {}", e)));
                 }
             };
 
@@ -214,7 +225,7 @@ impl TelegramService {
                 }
             }
             Err(e) => {
-                tracing::error!("deleteMessage failed: {}", e);
+                tracing::error!("deleteMessage failed: {}", self.scrub(e.to_string()));
                 (false, "error".into())
             }
         }
@@ -321,7 +332,7 @@ impl TelegramService {
             .timeout(std::time::Duration::from_secs(constants::HTTP_TIMEOUT_METADATA_SECS))
             .send()
             .await
-            .map_err(|e| format!("Download manifest failed: {}", e))?;
+            .map_err(|e| self.scrub(format!("Download manifest failed: {}", e)))?;
 
         let body = resp.bytes().await.map_err(|e| e.to_string())?;
 

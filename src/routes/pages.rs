@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
 
 use crate::config;
 use crate::database;
+use crate::error::http_error;
 use crate::state::AppState;
 
 fn page_cfg(state: &AppState) -> serde_json::Value {
@@ -64,6 +67,7 @@ fn enrich_files(files: &[database::FileMetadata]) -> Vec<serde_json::Value> {
                 "upload_date": f.upload_date,
                 "upload_date_short": upload_date_short,
                 "display_id": display_id,
+                "has_password": f.share_password.is_some(),
             })
         })
         .collect()
@@ -76,7 +80,7 @@ fn render(state: &AppState, template: &str, ctx: &tera::Context) -> Response {
             tracing::error!("Template render error: {}", e);
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Template error: {}", e),
+                "服务器内部错误",
             )
                 .into_response()
         }
@@ -140,6 +144,7 @@ async fn image_hosting(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 async fn share_page(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let meta = database::get_file_by_id(&state.db_pool, &file_id);
     let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
@@ -156,6 +161,19 @@ async fn share_page(
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&f.file_id);
+
+            // 分享密码：未解锁则渲染密码输入页（解锁后写 sp_<id> cookie，再访问即放行）。
+            if let Some(ref hash) = f.share_password {
+                let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok());
+                if !crate::auth::share_unlocked(cookie_header, display_id, hash) {
+                    let mut ctx = tera::Context::new();
+                    ctx.insert("file_id", &file_id);
+                    ctx.insert("filename", &f.filename);
+                    ctx.insert("request_path", &format!("/share/{}", file_id));
+                    return render(&state, "share_unlock.html", &ctx);
+                }
+            }
+
             let filename_encoded =
                 percent_encoding::utf8_percent_encode(&f.filename, percent_encoding::NON_ALPHANUMERIC).to_string();
             let relative_url = format!("/d/{}/{}", display_id, filename_encoded);
@@ -187,6 +205,58 @@ async fn share_page(
     }
 }
 
+#[derive(Deserialize)]
+pub struct UnlockRequest {
+    password: String,
+}
+
+fn is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v == "https")
+}
+
+/// 校验某个受保护分享文件的密码；成功则写入 `sp_<id>` 解锁 cookie。公开端点。
+async fn share_unlock(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UnlockRequest>,
+) -> Response {
+    let f = match database::get_file_by_id(&state.db_pool, &file_id) {
+        Ok(Some(f)) => f,
+        _ => return http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+    };
+    let hash = match f.share_password {
+        Some(h) => h,
+        // 无密码：直接视为已解锁。
+        None => return Json(serde_json::json!({ "status": "ok" })).into_response(),
+    };
+    let display_id = f
+        .short_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&f.file_id)
+        .to_string();
+
+    let pw = payload.password.clone();
+    let hash_for_verify = hash.clone();
+    let ok = tokio::task::spawn_blocking(move || crate::auth::verify_password(&pw, &hash_for_verify))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        return http_error(StatusCode::UNAUTHORIZED, "密码错误", "wrong_password").into_response();
+    }
+
+    let cookie = crate::auth::build_share_cookie(&display_id, &hash, is_https(&headers));
+    (
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({ "status": "ok" })),
+    )
+        .into_response()
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/welcome", get(welcome))
@@ -196,4 +266,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/settings", get(settings_page))
         .route("/image_hosting", get(image_hosting))
         .route("/share/:file_id", get(share_page))
+        .route("/share/:file_id/unlock", post(share_unlock))
 }

@@ -6,6 +6,18 @@ use crate::events::{build_file_event, BroadcastEventBus};
 use crate::telegram::service::TelegramService;
 use crate::telegram::types::*;
 
+/// 判断一条消息所在的聊天是否就是配置的存储频道。摄取文件和响应 "get" 指令
+/// 都必须先过这一关，否则任何能给 bot 发消息的人都能让本实例代理/暴露任意文件。
+fn chat_is_allowed(chat: &Chat, channel_name: &str) -> bool {
+    if channel_name.starts_with('@') {
+        chat.username
+            .as_deref()
+            .map_or(false, |u| u == channel_name.trim_start_matches('@'))
+    } else {
+        chat.id.to_string() == channel_name
+    }
+}
+
 pub async fn run_bot_polling(
     bot_token: String,
     channel_name: String,
@@ -93,7 +105,7 @@ async fn get_updates(
         .timeout(Duration::from_secs(timeout as u64 + 10))
         .send()
         .await
-        .map_err(|e| format!("Request error: {}", e))?;
+        .map_err(|e| format!("Request error: {}", e).replace(bot_token, "<token>"))?;
 
     let data: TelegramResponse<Vec<Update>> = resp
         .json()
@@ -124,9 +136,12 @@ async fn process_update(
         if msg.document.is_some() || msg.photo.is_some() {
             handle_new_file(msg, channel_name, db_pool, event_bus).await;
         }
-        // Handle "get" reply
+        // Handle "get" reply —— 仅响应来自配置频道的指令，避免被陌生聊天滥用为文件代理。
         if let Some(text) = &msg.text {
-            if text.trim().to_lowercase() == "get" && msg.reply_to_message.is_some() {
+            if text.trim().to_lowercase() == "get"
+                && msg.reply_to_message.is_some()
+                && chat_is_allowed(&msg.chat, channel_name)
+            {
                 handle_get_reply(msg, tg_service, base_url).await;
             }
         }
@@ -151,16 +166,7 @@ async fn handle_new_file(
     event_bus: &BroadcastEventBus,
 ) {
     // Check source
-    let chat = &message.chat;
-    let is_allowed = if channel_name.starts_with('@') {
-        chat.username
-            .as_deref()
-            .map_or(false, |u| u == channel_name.trim_start_matches('@'))
-    } else {
-        chat.id.to_string() == channel_name
-    };
-
-    if !is_allowed {
+    if !chat_is_allowed(&message.chat, channel_name) {
         return;
     }
 
@@ -348,6 +354,6 @@ async fn send_message(
         }))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string().replace(bot_token, "<token>"))?;
     Ok(())
 }
