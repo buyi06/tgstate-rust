@@ -1,54 +1,18 @@
 use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Multipart, State};
-use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use bytes::BytesMut;
 use tokio::sync::Semaphore;
 
-use crate::auth::{self, COOKIE_NAME};
 use crate::config;
 use crate::constants;
 use crate::database;
 use crate::error::http_error;
 use crate::state::AppState;
 use crate::telegram::service::TelegramService;
-
-#[derive(Debug, Default)]
-struct UploadAuthProgress {
-    auth_verified: bool,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum UploadFieldError {
-    FileBeforeAuth,
-}
-
-fn advance_upload_auth_state(
-    mut state: UploadAuthProgress,
-    prechecked_auth: bool,
-    auth_optional: bool,
-    field_name: &str,
-    _field_value: Option<&str>,
-) -> Result<UploadAuthProgress, UploadFieldError> {
-    if prechecked_auth || auth_optional {
-        state.auth_verified = true;
-        return Ok(state);
-    }
-
-    if field_name == "key" {
-        state.auth_verified = true;
-        return Ok(state);
-    }
-
-    if field_name == "file" && !state.auth_verified {
-        return Err(UploadFieldError::FileBeforeAuth);
-    }
-
-    Ok(state)
-}
 
 /// Sanitize filename: extract basename, limit length, remove dangerous chars.
 fn sanitize_filename(raw: &str) -> String {
@@ -63,8 +27,7 @@ fn sanitize_filename(raw: &str) -> String {
     if clean.is_empty() {
         return "upload".to_string();
     }
-    // UTF-8-safe byte-length cap: `clean[..255]` would panic if byte 255
-    // falls inside a multibyte character (e.g. a Chinese filename).
+    // UTF-8-safe byte-length cap.
     if clean.len() <= 255 {
         return clean;
     }
@@ -80,9 +43,11 @@ fn sanitize_filename(raw: &str) -> String {
 
 async fn upload_file(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
+    // 鉴权完全由 `auth_middleware` 负责：能到达这里，要么请求带着有效 session cookie，
+    // 要么处于“尚未设置密码”的首启阶段（该阶段中间件会把除引导页外的一切挡在外面，
+    // 所以正常情况下不会有未授权请求到达上传）。PicGo / X-Api-Key 鉴权已移除。
     let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
 
     let bot_token = app_settings
@@ -102,152 +67,32 @@ async fn upload_file(
         ));
     }
 
-    // Pre-check auth with header-only info (before consuming body)
-    let has_referer = headers.get("referer").is_some();
-    let cookie_value = headers
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';').find_map(|c| {
-                let c = c.trim();
-                c.strip_prefix(&format!("{}=", COOKIE_NAME))
-                    .map(|v| v.to_string())
-            })
-        });
-
-    let picgo_key = app_settings.get("PICGO_API_KEY").and_then(|v| v.as_deref());
-    let pass_word = app_settings.get("PASS_WORD").and_then(|v| v.as_deref());
-    // Upload auth used to derive a sha256 of the password and feed that as
-    // the expected cookie value. That comparison was always a no-op because
-    // session cookies are random tokens (see `auth::generate_session_token`)
-    // that are independent of the password hash. The auth middleware already
-    // validates the session cookie against the stored SESSION_TOKEN before
-    // the request ever reaches this handler, so we just forward the raw
-    // password presence to `ensure_upload_auth` for the referer / picgo-key
-    // branches. The cookie branch inside `ensure_upload_auth` is reachable
-    // only for header-level requests the middleware already allowed.
-    let pass_word_hash_ref = pass_word;
-
-    let header_key = headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let auth_optional = picgo_key.map_or(true, |k| k.is_empty())
-        && pass_word_hash_ref.map_or(true, |p| p.is_empty());
-    // Pre-check auth using only HEADER-available credentials: the session
-    // cookie (browser login) and/or x-api-key (PicGo / API clients). These
-    // are the only credentials that exist before we consume the multipart
-    // body. Referer is client-controlled and auth.rs ignores it.
-    //
-    // The browser session cookie is the random SESSION_TOKEN from
-    // app_settings, NOT the password. We verify it directly against the
-    // stored token so a logged-in browser can upload without submitting a
-    // form `key` field. `auth_middleware` uses the same comparison.
-    let session_token_owned = app_settings
-        .get("SESSION_TOKEN")
-        .and_then(|v| v.clone());
-    let cookie_valid = match (cookie_value.as_deref(), session_token_owned.as_deref()) {
-        (Some(c), Some(t)) if !c.is_empty() && !t.is_empty() => {
-            auth::secure_compare(c, t)
-        }
-        _ => false,
-    };
-    // ensure_upload_auth handles the x-api-key / PicGo path. We pass None
-    // for the cookie because cookie validity is handled via `cookie_valid`
-    // above — that function still compares cookie to the password hash,
-    // which does not match the random session token used in v2.x.
-    let prechecked_auth = cookie_valid
-        || auth::ensure_upload_auth(
-            has_referer,
-            None,
-            picgo_key,
-            pass_word_hash_ref,
-            header_key.as_deref(),
-        )
-        .is_ok();
-
-    // Parse multipart body - stream file chunks to Telegram
-    let mut form_key: Option<String> = None;
-    let mut upload_result: Option<Result<String, String>> = None;
-    let mut auth_progress = UploadAuthProgress {
-        auth_verified: prechecked_auth || auth_optional,
-    };
-
     let tg_service = TelegramService::new(
         bot_token.to_string(),
         channel_name.to_string(),
         state.http_client.clone(),
     );
 
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "key" {
-            let key_text = field.text().await.ok();
-            if !auth_progress.auth_verified {
-                if let Err((_, msg, code)) = auth::ensure_upload_auth(
-                    has_referer,
-                    None,
-                    picgo_key,
-                    pass_word_hash_ref,
-                    key_text.as_deref(),
-                ) {
-                    return Err(http_error(axum::http::StatusCode::UNAUTHORIZED, msg, code));
-                }
+    let mut upload_result: Option<Result<String, String>> = None;
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(_) => {
+                return Err(http_error(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "上传数据读取失败",
+                    "multipart_error",
+                ));
             }
-            auth_progress = advance_upload_auth_state(
-                auth_progress,
-                prechecked_auth,
-                auth_optional,
-                &name,
-                key_text.as_deref(),
-            )
-            .map_err(|_| {
-                http_error(
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    "upload auth required before file field",
-                    "file_before_auth",
-                )
-            })?;
-            form_key = key_text;
-        } else if name == "file" {
-            auth_progress = advance_upload_auth_state(
-                auth_progress,
-                prechecked_auth,
-                auth_optional,
-                &name,
-                None,
-            )
-            .map_err(|_| {
-                http_error(
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    "upload auth required before file field",
-                    "file_before_auth",
-                )
-            })?;
+        };
+        if field.name() == Some("file") {
             let raw_filename = field.file_name().unwrap_or("upload").to_string();
             let filename = sanitize_filename(&raw_filename);
-
-            // Stream the file in chunks to Telegram
             upload_result = Some(
                 stream_upload_to_telegram(&tg_service, field, &filename, &state.db_pool).await,
             );
-        }
-    }
-
-    // Final auth check with form-level `key`. Only needed when header-level
-    // credentials (cookie / x-api-key) did not already satisfy auth — e.g.
-    // PicGo clients that authenticate by submitting PICGO_API_KEY in the
-    // multipart body instead of as a header.
-    if !prechecked_auth {
-        let final_key = form_key.as_deref();
-        if let Err((_, msg, code)) = auth::ensure_upload_auth(
-            has_referer,
-            None,
-            picgo_key,
-            pass_word_hash_ref,
-            final_key,
-        ) {
-            return Err(http_error(axum::http::StatusCode::UNAUTHORIZED, msg, code));
         }
     }
 
@@ -272,10 +117,8 @@ async fn upload_file(
     })))
 }
 
-/// Resolve the max number of chunks uploaded to Telegram concurrently.
-/// Overridable via the `UPLOAD_CONCURRENCY` env var (clamped to 1..=16): higher
-/// values trade memory (≈ value × 19.5MB) for throughput. `1` keeps memory low
-/// while still overlapping reads with a single in-flight upload (pipeline mode).
+/// 解析大文件分块并发上传数（env `UPLOAD_CONCURRENCY`，钳制到 1..=16）。越大越快也越吃
+/// 内存（峰值 ≈ 值 × 19.5MB）。
 fn parse_upload_concurrency(raw: Option<String>, default: usize) -> usize {
     raw.and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|v| *v >= 1 && *v <= 16)
@@ -292,22 +135,13 @@ fn upload_concurrency() -> usize {
     })
 }
 
-/// Stream a multipart upload to Telegram with **bounded-concurrency** chunking.
+/// 把 multipart 上传流式切块、**并发**上传到 Telegram。
 ///
-/// The field is read sequentially (the multipart body is a single stream), but
-/// each completed `TELEGRAM_CHUNK_SIZE` chunk is dispatched to a concurrent
-/// upload task. At most `upload_concurrency()` chunks upload at once, so peak
-/// memory is roughly `(concurrency + 1) × ~19.5MB` rather than the whole file.
-/// Reading the next chunk overlaps with uploading in-flight ones — the main win
-/// over the previous fully-serial implementation, which neither overlapped
-/// read-with-upload nor uploaded chunks in parallel.
-///
-/// The first chunk is uploaded synchronously so its `message_id` can anchor the
-/// reply-thread for the remaining chunks and the manifest (purely cosmetic in
-/// the channel; reconstruction relies on the manifest, not the reply chain).
-/// Concurrent completion is out of order, so chunks carry their index and are
-/// re-sorted before the manifest is written. On any failure the chunks that did
-/// upload are best-effort deleted so the channel is not left with orphans.
+/// 读流是单线程顺序的，但每凑满一个 `TELEGRAM_CHUNK_SIZE` 就立刻派发给并发上传任务，
+/// 最多 `upload_concurrency()` 块同时在传（用信号量背压读循环，限制峰值内存）。所有块
+/// 都走并发池、互不等待——重建只依赖 manifest，不依赖 Telegram 的 reply 关系，因此不再
+/// 需要先同步上传一个“锚点”块（这正是相比旧实现的提速点：首块不再串行阻塞后续块）。
+/// 并发完成是乱序的，按 index 重排后写 manifest。任一失败都尽力删除已上传块以免留孤儿。
 async fn stream_upload_to_telegram(
     tg_service: &TelegramService,
     mut field: axum::extract::multipart::Field<'_>,
@@ -320,14 +154,26 @@ async fn stream_upload_to_telegram(
     let mut total_size: usize = 0;
 
     let sem = Arc::new(Semaphore::new(concurrency));
-    // Chunks finished synchronously (currently only the anchor at index 0).
-    let mut results: Vec<(usize, String)> = Vec::new();
-    // Chunks uploading concurrently; each yields (index, "message_id:file_id").
     let mut tasks: Vec<tokio::task::JoinHandle<Result<(usize, String), String>>> = Vec::new();
     let mut chunk_index: usize = 0;
-    let mut anchor_id: Option<i64> = None;
 
-    while let Ok(Some(bytes)) = field.chunk().await {
+    loop {
+        let bytes = match field.chunk().await {
+            Ok(Some(b)) => b,
+            Ok(None) => break,
+            Err(e) => {
+                // 读取上传流出错（客户端中断 / 超出 body 上限）：清理已上传块，
+                // 绝不能把被截断的内容当作完整文件写入清单和数据库。
+                let mut done = Vec::new();
+                for task in std::mem::take(&mut tasks) {
+                    if let Ok(Ok((_, c))) = task.await {
+                        done.push(c);
+                    }
+                }
+                cleanup_uploaded_chunks(tg_service, &done).await;
+                return Err(format!("读取上传数据失败: {}", e));
+            }
+        };
         buffer.extend_from_slice(&bytes);
         total_size += bytes.len();
 
@@ -336,39 +182,25 @@ async fn stream_upload_to_telegram(
             let idx = chunk_index;
             chunk_index += 1;
             let chunk_name = format!("{}.part{}", filename, idx + 1);
-
-            if idx == 0 {
-                // Anchor: upload synchronously to obtain the reply-thread root.
-                let message = tg_service
-                    .send_document_with_retry(data, &chunk_name, None)
-                    .await?;
-                anchor_id = Some(message.message_id);
-                let doc = message.document.ok_or("No document in chunk response")?;
-                results.push((idx, format!("{}:{}", message.message_id, doc.file_id)));
-            } else {
-                // Acquire the permit BEFORE spawning so no more than
-                // `concurrency` chunks are buffered/in-flight at once. This also
-                // back-pressures the read loop, bounding memory.
-                let permit = sem
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let tg = tg_service.clone();
-                let reply = anchor_id;
-                tasks.push(tokio::spawn(async move {
-                    let _permit = permit;
-                    let message = tg.send_document_with_retry(data, &chunk_name, reply).await?;
-                    let doc = message
-                        .document
-                        .ok_or_else(|| "No document in chunk response".to_string())?;
-                    Ok((idx, format!("{}:{}", message.message_id, doc.file_id)))
-                }));
-            }
+            // 先拿许可（背压），再 spawn，确保最多 concurrency 块在途。
+            let permit = sem
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|e| e.to_string())?;
+            let tg = tg_service.clone();
+            tasks.push(tokio::spawn(async move {
+                let _permit = permit;
+                let message = tg.send_document_with_retry(data, &chunk_name, None).await?;
+                let doc = message
+                    .document
+                    .ok_or_else(|| "No document in chunk response".to_string())?;
+                Ok((idx, format!("{}:{}", message.message_id, doc.file_id)))
+            }));
         }
     }
 
-    // No full chunk was produced → small (single-shot) file.
+    // 没凑满过一个完整块 → 小文件，单次直传。
     if chunk_index == 0 {
         if buffer.is_empty() {
             return Err("文件为空".into());
@@ -386,7 +218,7 @@ async fn stream_upload_to_telegram(
         return Ok(short_id);
     }
 
-    // Dispatch the trailing partial chunk (if any) as the final chunk.
+    // 末尾不足一块的残余作为最后一块派发。
     if !buffer.is_empty() {
         let data = buffer.freeze().to_vec();
         let idx = chunk_index;
@@ -397,10 +229,9 @@ async fn stream_upload_to_telegram(
             .await
             .map_err(|e| e.to_string())?;
         let tg = tg_service.clone();
-        let reply = anchor_id;
         tasks.push(tokio::spawn(async move {
             let _permit = permit;
-            let message = tg.send_document_with_retry(data, &chunk_name, reply).await?;
+            let message = tg.send_document_with_retry(data, &chunk_name, None).await?;
             let doc = message
                 .document
                 .ok_or_else(|| "No document in chunk response".to_string())?;
@@ -408,7 +239,8 @@ async fn stream_upload_to_telegram(
         }));
     }
 
-    // Join all concurrent chunk uploads, capturing the first error if any.
+    // 等待所有并发块完成，记录首个错误。
+    let mut results: Vec<(usize, String)> = Vec::new();
     let mut first_err: Option<String> = None;
     for task in tasks {
         match task.await {
@@ -428,7 +260,7 @@ async fn stream_upload_to_telegram(
         return Err(e);
     }
 
-    // Concurrent completion is out of order; restore chunk order for the manifest.
+    // 并发完成乱序；按 index 重排，供下载端按序拼接。
     let chunk_ids = assemble_ordered_chunk_ids(results);
 
     tracing::info!(
@@ -442,7 +274,7 @@ async fn stream_upload_to_telegram(
     let manifest = build_blob_manifest(filename, &chunk_ids);
     let manifest_name = format!("{}.manifest", filename);
     let manifest_msg = match tg_service
-        .send_document_with_retry(manifest.into_bytes(), &manifest_name, anchor_id)
+        .send_document_with_retry(manifest.into_bytes(), &manifest_name, None)
         .await
     {
         Ok(m) => m,
@@ -473,8 +305,7 @@ async fn stream_upload_to_telegram(
     }
 }
 
-/// Restore ascending chunk order (concurrent uploads finish out of order) and
-/// drop the index, yielding the `"message_id:file_id"` composites for the manifest.
+/// Restore ascending chunk order (concurrent uploads finish out of order) and drop the index.
 fn assemble_ordered_chunk_ids(mut results: Vec<(usize, String)>) -> Vec<String> {
     results.sort_by_key(|(idx, _)| *idx);
     results.into_iter().map(|(_, id)| id).collect()
@@ -500,9 +331,7 @@ fn chunk_message_id(composite: &str) -> Option<i64> {
         .and_then(|(mid, _)| mid.parse::<i64>().ok())
 }
 
-/// Best-effort deletion of already-uploaded chunks after a failed multi-chunk
-/// upload, so a partial upload does not leave orphaned messages in the channel.
-/// Each entry is a `"message_id:file_id"` composite; only the message_id is used.
+/// Best-effort deletion of already-uploaded chunks after a failed multi-chunk upload.
 async fn cleanup_uploaded_chunks(tg_service: &TelegramService, composites: &[String]) {
     for composite in composites {
         if let Some(mid) = chunk_message_id(composite) {
@@ -517,22 +346,8 @@ pub fn router() -> Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_upload_auth_state, UploadAuthProgress, UploadFieldError};
-    use crate::config::Settings;
-    use crate::database;
-    use crate::state::AppState;
-    use axum::body::{to_bytes, Body};
-    use axum::http::{header, Request, StatusCode};
-    use axum::Router;
-    use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use tower::util::ServiceExt;
-
     #[test]
     fn ordered_chunk_ids_sort_by_index_regardless_of_completion_order() {
-        // Concurrent uploads finish out of order; the manifest must still list
-        // chunks in ascending index order so the download path concatenates
-        // them correctly.
         let out = super::assemble_ordered_chunk_ids(vec![
             (2, "30:c".to_string()),
             (0, "10:a".to_string()),
@@ -575,94 +390,5 @@ mod tests {
         assert_eq!(super::parse_upload_concurrency(Some("17".into()), d), d); // above max
         assert_eq!(super::parse_upload_concurrency(Some("abc".into()), d), d); // non-numeric
         assert_eq!(super::parse_upload_concurrency(None, d), d); // unset
-    }
-
-    fn test_state() -> Arc<AppState> {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let data_dir = std::env::temp_dir()
-            .join(format!("tgstate-upload-test-{}", unique))
-            .to_string_lossy()
-            .to_string();
-
-        let settings = Settings {
-            bot_token: Some("123456:test-token".into()),
-            channel_name: Some("@test_channel".into()),
-            pass_word: Some("secret".into()),
-            picgo_api_key: None,
-            base_url: "http://127.0.0.1:8000".into(),
-            _mode: "p".into(),
-            _file_route: "/d/".into(),
-            data_dir: data_dir.clone(),
-        };
-
-        let db_pool = database::init_db(&data_dir);
-        let tera = tera::Tera::default();
-        let http_client = reqwest::Client::new();
-        let app_settings = crate::config::get_app_settings(&settings, &db_pool);
-        Arc::new(AppState::new(
-            settings,
-            tera,
-            http_client,
-            db_pool,
-            app_settings,
-            true,
-        ))
-    }
-
-    fn multipart_request_with_file_before_key() -> Request<Body> {
-        let boundary = "X-BOUNDARY";
-        let body = format!(
-            "--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--{b}\r\nContent-Disposition: form-data; name=\"key\"\r\n\r\nsecret\r\n--{b}--\r\n",
-            b = boundary
-        );
-
-        Request::builder()
-            .method("POST")
-            .uri("/api/upload")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={}", boundary),
-            )
-            .body(Body::from(body))
-            .unwrap()
-    }
-
-    #[test]
-    fn upload_requires_key_before_file_for_api_requests() {
-        let state = UploadAuthProgress::default();
-        let result = advance_upload_auth_state(state, false, false, "file", None);
-        assert!(matches!(result, Err(UploadFieldError::FileBeforeAuth)));
-    }
-
-    #[test]
-    fn upload_accepts_key_before_file_for_api_requests() {
-        let state = UploadAuthProgress::default();
-        let state = advance_upload_auth_state(state, false, false, "key", Some("secret")).unwrap();
-        let state = advance_upload_auth_state(state, false, false, "file", None).unwrap();
-        assert!(state.auth_verified);
-    }
-
-    #[tokio::test]
-    async fn upload_route_rejects_file_field_before_auth() {
-        let state = test_state();
-        let app = Router::new()
-            .merge(super::router())
-            .with_state(state.clone());
-        let response = app
-            .oneshot(multipart_request_with_file_before_key())
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let text = String::from_utf8(body.to_vec()).unwrap();
-        assert!(text.contains("file_before_auth"), "unexpected body: {}", text);
-
-        let files = database::get_all_files(&state.db_pool).unwrap();
-        assert!(files.is_empty(), "unexpected files persisted: {:?}", files);
     }
 }

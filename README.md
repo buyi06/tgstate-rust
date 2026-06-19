@@ -8,8 +8,8 @@
 
 - 通过 Web 界面或 API 上传文件到 Telegram 频道
 - 大文件自动分块上传（>19.5MB），下载时流式拼接
-- 短链接分享，支持在线预览（图片、视频、PDF、文本等）
-- 图床模式，兼容 PicGo API
+- 短链接分享，支持在线预览（图片、视频、PDF、文本等），可为单个文件设置访问密码
+- 图床模式，图片网格画廊
 - Telegram Bot 自动同步频道文件变动
 - SSE 实时推送文件列表更新
 - 网页引导式配置，无需预填环境变量
@@ -38,7 +38,8 @@ cd tgstate
 ### 方式二：Docker
 
 ```bash
-docker run -d --name tgstate -p 8000:8000 -v tgstate_data:/app/data \
+# 容器内服务监听 7860（兼容 Hugging Face Spaces），用 -p 主机端口:7860 映射
+docker run -d --name tgstate -p 8000:7860 -v tgstate_data:/app/data \
   $(docker build -q .)
 ```
 
@@ -49,7 +50,7 @@ services:
   tgstate:
     build: .
     ports:
-      - "8000:8000"
+      - "8000:7860"
     volumes:
       - tgstate_data:/app/data
     restart: unless-stopped
@@ -61,7 +62,7 @@ volumes:
 ### 方式三：从源码编译
 
 ```bash
-# 需要 Rust 1.75+
+# 需要 Rust 1.82+
 cargo build --release
 ./target/release/tgstate
 ```
@@ -84,7 +85,6 @@ cargo build --release
 | `BOT_TOKEN` | Telegram Bot Token | - |
 | `CHANNEL_NAME` | 目标频道 `@name` 或 `-100xxx` | - |
 | `PASS_WORD` | Web 界面访问密码 | - |
-| `PICGO_API_KEY` | PicGo 上传 API 密钥 | - |
 | `BASE_URL` | 公开访问 URL | `http://127.0.0.1:8000` |
 | `DATA_DIR` | 数据目录 | `app/data` |
 | `LOG_LEVEL` | 日志级别 | `info` |
@@ -107,7 +107,9 @@ cargo build --release
 | `GET` | `/api/files` | 获取文件列表 |
 | `DELETE` | `/api/files/:file_id` | 删除文件 |
 | `POST` | `/api/batch_delete` | 批量删除 |
+| `POST` | `/api/files/:file_id/share-password` | 设置/清除分享密码（空密码=清除） |
 | `GET` | `/d/:short_id` | 短链接下载/预览 |
+| `POST` | `/share/:short_id/unlock` | 校验分享密码并解锁下载 |
 | `GET` | `/api/file-updates` | SSE 实时更新 |
 
 ### 认证
@@ -127,23 +129,16 @@ cargo build --release
 | `POST` | `/api/verify/bot` | 验证 Bot Token |
 | `POST` | `/api/verify/channel` | 验证频道 |
 
-### PicGo 兼容
-
-```bash
-curl -X POST http://your-host:8000/api/upload \
-  -H "X-Api-Key: your_picgo_api_key" \
-  -F "file=@image.png"
-```
-
 ## 安全
 
-- CSRF 防护（Origin 头校验）
+- CSRF 防护（Origin 头校验 + SameSite=Strict cookie）
 - 登录限流（5 次/分钟/IP）
 - Content Security Policy
-- Cookie 加固（HttpOnly、SameSite=Strict、24h 超时）
-- API 白名单认证
-- 输入验证与错误脱敏
-- 安全头（X-Frame-Options、X-XSS-Protection 等）
+- Cookie 加固（HttpOnly、SameSite=Strict）
+- 会话鉴权（argon2 密码哈希 + 与密码无关的随机会话令牌）
+- 分享链接可选密码保护（argon2 哈希，逐文件）
+- 输入验证与错误脱敏（含 bot token 日志脱敏）
+- 安全头（X-Frame-Options、nosniff、Referrer-Policy 等）
 
 ## 技术栈
 

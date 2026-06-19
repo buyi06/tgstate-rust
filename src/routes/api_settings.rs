@@ -28,8 +28,6 @@ pub struct AppConfigRequest {
     pass_word: Option<String>,
     #[serde(rename = "BASE_URL")]
     base_url: Option<String>,
-    #[serde(rename = "PICGO_API_KEY")]
-    picgo_api_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -110,10 +108,6 @@ fn merge_config(
         let v = v.trim().to_string();
         result.insert("BASE_URL".into(), if v.is_empty() { None } else { Some(v) });
     }
-    if let Some(ref v) = incoming.picgo_api_key {
-        let v = v.trim().to_string();
-        result.insert("PICGO_API_KEY".into(), if v.is_empty() { None } else { Some(v) });
-    }
     Ok(result)
 }
 
@@ -135,7 +129,6 @@ async fn get_app_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             "CHANNEL_NAME": settings.get("CHANNEL_NAME").and_then(|v| v.as_deref()).unwrap_or(""),
             "PASS_WORD_SET": settings.get("PASS_WORD").and_then(|v| v.as_deref()).map_or(false, |v| !v.is_empty()),
             "BASE_URL": settings.get("BASE_URL").and_then(|v| v.as_deref()).unwrap_or(""),
-            "PICGO_API_KEY_SET": settings.get("PICGO_API_KEY").and_then(|v| v.as_deref()).map_or(false, |v| !v.is_empty()),
         },
         "bot": {
             "ready": bot.bot_ready,
@@ -150,7 +143,16 @@ async fn save_config_only(
     Json(payload): Json<AppConfigRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
     let existing = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
-    let merged = merge_config(&existing, &payload)
+    // merge_config 在设置新密码时内部会做 argon2 哈希（CPU 密集），放到阻塞线程池执行。
+    let merged = tokio::task::spawn_blocking(move || merge_config(&existing, &payload))
+        .await
+        .map_err(|_| {
+            http_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "内部错误",
+                "internal_error",
+            )
+        })?
         .map_err(|(status, msg, code)| http_error(status, msg, code))?;
 
     if let Err((status, msg, code)) = validate_config(&merged) {
@@ -179,7 +181,16 @@ async fn save_and_apply(
     Json(payload): Json<AppConfigRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
     let existing = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
-    let merged = merge_config(&existing, &payload)
+    // merge_config 在设置新密码时内部会做 argon2 哈希（CPU 密集），放到阻塞线程池执行。
+    let merged = tokio::task::spawn_blocking(move || merge_config(&existing, &payload))
+        .await
+        .map_err(|_| {
+            http_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "内部错误",
+                "internal_error",
+            )
+        })?
         .map_err(|(status, msg, code)| http_error(status, msg, code))?;
 
     if let Err((status, msg, code)) = validate_config(&merged) {
@@ -256,14 +267,24 @@ async fn set_password(
     let password = payload.password.trim().to_string();
 
     // Hash the password with argon2 and compute session token
-    let hashed = auth::hash_password(&password).map_err(|e| {
-        tracing::error!("密码哈希失败: {}", e);
-        crate::error::AppError::new(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "密码哈希失败",
-            "hash_error",
-        )
-    })?;
+    let hashed = tokio::task::spawn_blocking(move || auth::hash_password(&password))
+        .await
+        .map_err(|e| {
+            tracing::error!("密码哈希任务失败: {}", e);
+            crate::error::AppError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "密码哈希失败",
+                "hash_error",
+            )
+        })?
+        .map_err(|e| {
+            tracing::error!("密码哈希失败: {}", e);
+            crate::error::AppError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "密码哈希失败",
+                "hash_error",
+            )
+        })?;
     // Random session token, independent of the password.
     let session_token = auth::generate_session_token();
 

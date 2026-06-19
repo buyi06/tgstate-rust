@@ -49,10 +49,22 @@ async fn check_rate(
     let mut map = store.lock().await;
     let now = Instant::now();
 
-    if map.len() > constants::RATE_LIMIT_MAX_ENTRIES {
+    if map.len() >= constants::RATE_LIMIT_MAX_ENTRIES && !map.contains_key(&ip) {
+        // 先清掉本窗口内已过期的条目。
         map.retain(|_, entry| now.duration_since(entry.window_start) < window);
-        if map.len() > constants::RATE_LIMIT_MAX_ENTRIES {
-            return false;
+        // 仍然满，则淘汰最旧的条目给新 IP 腾位置——绝不能直接拒绝新请求，
+        // 否则攻击者用大量轮换 IP（如 IPv6 段）填满表后会让所有合法新用户被 429。
+        while map.len() >= constants::RATE_LIMIT_MAX_ENTRIES {
+            let oldest = map
+                .iter()
+                .min_by_key(|(_, e)| e.window_start)
+                .map(|(k, _)| *k);
+            match oldest {
+                Some(k) => {
+                    map.remove(&k);
+                }
+                None => break,
+            }
         }
     }
 
@@ -156,7 +168,7 @@ pub async fn rate_limit_middleware(
 
 /// Periodically clean up expired entries (call from a background task)
 pub async fn cleanup_expired(limiter: &RateLimiter) {
-    let window = Duration::from_secs(constants::RATE_LIMIT_CLEANUP_INTERVAL_SECS);
+    let window = Duration::from_secs(constants::RATE_LIMIT_WINDOW_SECS);
     let now = Instant::now();
 
     for store in [&limiter.login, &limiter.upload, &limiter.api, &limiter.download] {

@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
@@ -67,6 +67,47 @@ fn is_https(headers: &HeaderMap) -> bool {
         .map_or(false, |v| v == "https")
 }
 
+fn forbidden_csrf() -> Response {
+    let mut resp = Response::new(Body::from(
+        serde_json::json!({
+            "status": "error",
+            "code": "csrf_origin_mismatch",
+            "message": "请求来源校验失败"
+        })
+        .to_string(),
+    ));
+    *resp.status_mut() = StatusCode::FORBIDDEN;
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/json; charset=utf-8".parse().unwrap(),
+    );
+    resp
+}
+
+/// CSRF 纵深防御（配合 cookie 的 `SameSite=Strict`）：对会改变状态的请求方法，
+/// 若带有 `Origin` 头，则其来源必须与 `Host` 一致。没有 `Origin` 的请求
+/// （curl / PicGo 等非浏览器客户端）一律放行，避免破坏 API 用法。
+fn origin_allowed(headers: &HeaderMap) -> bool {
+    let origin = match headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(o) => o,
+        None => return true,
+    };
+    let host = match headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(h) => h,
+        None => return true,
+    };
+    origin
+        .split_once("://")
+        .map(|(_, authority)| authority == host)
+        .unwrap_or(false)
+}
+
 fn load_settings_snapshot(
     state: &Arc<AppState>,
 ) -> (Option<String>, Option<String>) {
@@ -102,6 +143,13 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     let path = req.uri().path().to_string();
+
+    // CSRF 纵深防御：状态变更请求若带 Origin 必须同源（配合 SameSite=Strict cookie）。
+    let m = req.method().clone();
+    let is_write = m == Method::POST || m == Method::PUT || m == Method::PATCH || m == Method::DELETE;
+    if is_write && !origin_allowed(req.headers()) {
+        return forbidden_csrf();
+    }
 
     // Always-allowed static paths
     let public_static_prefixes = [

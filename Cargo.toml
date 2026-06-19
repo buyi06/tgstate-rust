@@ -3,7 +3,7 @@ name = "tgstate"
 version = "2.0.7"
 edition = "2021"
 description = "A Telegram-based private file storage system"
-rust-version = "1.75"
+rust-version = "1.82"
 
 [dependencies]
 # Web framework

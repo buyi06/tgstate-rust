@@ -51,42 +51,7 @@ fn session_max_age_secs() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_upload_auth, generate_session_token};
-
-    #[test]
-    fn password_only_api_request_without_session_is_rejected() {
-        let result = ensure_upload_auth(false, None, None, Some("hashed"), None);
-        match result {
-            Err((401, _, "login_required")) => {}
-            other => panic!("expected login_required rejection, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn password_only_request_with_matching_session_is_allowed() {
-        let result = ensure_upload_auth(false, Some("hashed"), None, Some("hashed"), None);
-        assert_eq!(result, Ok(()));
-    }
-
-    #[test]
-    fn password_set_referer_only_request_is_rejected() {
-        // Referer alone must not grant upload access when a password is configured.
-        let result = ensure_upload_auth(true, None, None, Some("hashed"), None);
-        match result {
-            Err((401, _, "login_required")) => {}
-            other => panic!("expected login_required rejection, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn picgo_only_referer_only_request_is_rejected() {
-        // Referer alone must not grant upload access when only a PicGo key is configured.
-        let result = ensure_upload_auth(true, None, Some("secret"), None, None);
-        match result {
-            Err((401, _, "invalid_api_key")) => {}
-            other => panic!("expected invalid_api_key rejection, got {:?}", other),
-        }
-    }
+    use super::generate_session_token;
 
     #[test]
     fn generate_session_token_is_64_hex_chars() {
@@ -177,56 +142,45 @@ pub fn verify_password_auto(input: &str, stored: &str) -> bool {
     }
 }
 
-/// Check upload auth. Returns Ok(()) if allowed, Err(status_code, message, code) if not.
-///
-/// `has_referer` is retained in the signature for call-site compatibility but no
-/// longer grants any access on its own — a matching session cookie or submitted
-/// key is always required when an API key or password is configured.
-pub fn ensure_upload_auth(
-    _has_referer: bool,
-    cookie_value: Option<&str>,
-    picgo_api_key: Option<&str>,
-    pass_word: Option<&str>,
-    submitted_key: Option<&str>,
-) -> Result<(), (u16, &'static str, &'static str)> {
-    let has_picgo = picgo_api_key.map_or(false, |k| !k.is_empty());
-    let has_pwd = pass_word.map_or(false, |p| !p.is_empty());
+// `ensure_upload_auth` 已随 PicGo / API-key 上传一并移除。上传鉴权现在完全由
+// `auth_middleware` 的 session 检查负责：浏览器登录拿到 session cookie 后即可上传。
 
-    // Neither set: allow all
-    if !has_picgo && !has_pwd {
-        return Ok(());
-    }
+// --- 分享密码：每个受保护文件用一枚 `sp_<id>` cookie 记录“已解锁”状态 ---
 
-    // Only PICGO_API_KEY set: require matching submitted key.
-    if has_picgo && !has_pwd {
-        if let Some(key) = submitted_key {
-            if secure_compare(key, picgo_api_key.unwrap()) {
-                return Ok(());
+/// 受保护分享文件的解锁 cookie 名。
+pub fn share_cookie_name(id: &str) -> String {
+    format!("sp_{}", id)
+}
+
+/// 从 Cookie 请求头里取出指定名字的 cookie 值。
+pub fn extract_cookie_value<'a>(cookie_header: Option<&'a str>, name: &str) -> Option<&'a str> {
+    let cookies = cookie_header?;
+    for part in cookies.split(';') {
+        if let Some((k, v)) = part.trim().split_once('=') {
+            if k == name {
+                return Some(v);
             }
         }
-        return Err((401, "无效的 API 密钥", "invalid_api_key"));
     }
+    None
+}
 
-    // Only PASS_WORD set: require matching session cookie.
-    if !has_picgo && has_pwd {
-        if let Some(cookie) = cookie_value {
-            if secure_compare(cookie, pass_word.unwrap()) {
-                return Ok(());
-            }
-        }
-        return Err((401, "需要网页登录", "login_required"));
+/// 判断请求是否已解锁某个有密码的分享文件：`sp_<id>` cookie 必须等于存储的
+/// argon2 哈希（哈希不可逆，作为解锁凭据放在 HttpOnly cookie 中是安全的）。
+pub fn share_unlocked(cookie_header: Option<&str>, id: &str, stored_hash: &str) -> bool {
+    match extract_cookie_value(cookie_header, &share_cookie_name(id)) {
+        Some(v) => secure_compare(v, stored_hash),
+        None => false,
     }
+}
 
-    // Both set: accept either a valid session cookie OR a valid submitted key.
-    if let Some(cookie) = cookie_value {
-        if secure_compare(cookie, pass_word.unwrap()) {
-            return Ok(());
-        }
-    }
-    if let Some(key) = submitted_key {
-        if secure_compare(key, picgo_api_key.unwrap()) {
-            return Ok(());
-        }
-    }
-    Err((401, "需要网页登录", "login_required"))
+/// 构造分享解锁 cookie（值即存储的哈希；HttpOnly，SameSite=Lax 以便从分享页跳转下载）。
+pub fn build_share_cookie(id: &str, value: &str, is_https: bool) -> String {
+    let secure = if is_https { "; Secure" } else { "" };
+    format!(
+        "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400{}",
+        share_cookie_name(id),
+        value,
+        secure
+    )
 }
