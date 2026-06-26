@@ -114,6 +114,63 @@ fn chunk_download_failed_response(chunk_id: &str) -> Response {
     .into_response()
 }
 
+/// 解析单区间 HTTP Range 为闭区间 [start, end]（0-based，含端点）。
+/// 支持 `bytes=a-b` / `bytes=a-`（至末尾）/ `bytes=-n`（末尾 n 字节）。
+/// 多区间、越界、非法一律返回 None（调用方据此退回 200 全量）。
+fn parse_single_range(header: &str, total: u64) -> Option<(u64, u64)> {
+    if total == 0 {
+        return None;
+    }
+    let spec = header.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None; // 多区间不支持
+    }
+    let (a, b) = spec.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    let (start, end) = if a.is_empty() {
+        // 末尾 n 字节：bytes=-n
+        let n: u64 = b.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        let n = n.min(total);
+        (total - n, total - 1)
+    } else {
+        let start: u64 = a.parse().ok()?;
+        let end: u64 = if b.is_empty() {
+            total - 1
+        } else {
+            b.parse().ok()?
+        };
+        (start, end.min(total - 1))
+    };
+    if start > end || start >= total {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// 把闭区间 [start, end] 映射到固定 `chunk_size` 切分下涉及的各 chunk，返回
+/// (chunk 下标, 块内起点, 块内终点(含))。末块更短由 `total` 约束。
+fn map_range_to_chunks(start: u64, end: u64, chunk_size: u64, total: u64) -> Vec<(usize, u64, u64)> {
+    let mut out = Vec::new();
+    if chunk_size == 0 || total == 0 || start > end || start >= total {
+        return out;
+    }
+    let end = end.min(total - 1);
+    let first = start / chunk_size;
+    let last = end / chunk_size;
+    for i in first..=last {
+        let g_start = i * chunk_size;
+        let g_end = ((i + 1) * chunk_size).min(total) - 1; // 该块全局闭区间终点
+        let s = start.max(g_start) - g_start;
+        let e = end.min(g_end) - g_start;
+        out.push((i as usize, s, e));
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn serve_file(
     state: &AppState,
     tg_service: &TelegramService,
@@ -122,6 +179,7 @@ async fn serve_file(
     headers: &HeaderMap,
     force_download: bool,
     is_head: bool,
+    total_size: Option<i64>,
 ) -> Response {
     // Parse composite file_id "message_id:real_file_id"
     let real_file_id = if let Some(pos) = file_id.find(':') {
@@ -219,19 +277,113 @@ async fn serve_file(
         let ct = guess_content_type(original_filename);
         let cd = content_disposition(original_filename, force_download);
 
+        // 总大小取自 DB 元数据（清单本身不记每块大小）。chunk 按固定
+        // TELEGRAM_CHUNK_SIZE 切分（仅末块更短），据此可把任意 Range 精确映射到涉及
+        // 的 chunk，从而支持大文件拖拽播放 / 断点续传。
+        let chunk_size = crate::constants::TELEGRAM_CHUNK_SIZE as u64;
+        let total = total_size.filter(|s| *s > 0).map(|s| s as u64);
+        // 仅当“块数 == ceil(total/chunk_size)”才相信固定分块假设，否则退回整文件流式，
+        // 避免历史上以不同分块大小上传的文件被错误切片。
+        let range_ok = total.is_some_and(|t| chunk_ids.len() as u64 == t.div_ceil(chunk_size));
+
         if is_head {
+            let mut b = Response::builder()
+                .header("Content-Type", ct)
+                .header("Content-Disposition", cd)
+                .header("Accept-Ranges", "bytes")
+                .header("X-Content-Type-Options", "nosniff");
+            if let Some(t) = total {
+                b = b.header("Content-Length", t);
+            }
+            return b.body(Body::empty()).unwrap();
+        }
+
+        // 单区间 Range 且固定分块假设成立 → 206 部分内容，只取涉及的 chunk。
+        let range_req = headers
+            .get("range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| total.and_then(|t| parse_single_range(h, t)));
+
+        if let (Some((start, end)), true) = (range_req, range_ok) {
+            let total = total.unwrap();
+            let selected: Vec<(String, u64, u64)> = map_range_to_chunks(start, end, chunk_size, total)
+                .into_iter()
+                .filter_map(|(i, s, e)| {
+                    chunk_ids.get(i).map(|c| {
+                        let real = c
+                            .split_once(':')
+                            .map(|(_, b)| b.to_string())
+                            .unwrap_or_else(|| c.clone());
+                        (real, s, e)
+                    })
+                })
+                .collect();
+            let content_len = end - start + 1;
+            let content_range = format!("bytes {}-{}/{}", start, end, total);
+
+            let tg = tg_service.clone();
+            let http = client.clone();
+            let body_stream = async_stream::stream! {
+                for (real_id, s, e) in selected {
+                    let mut got = None;
+                    // 取下载 URL 并对该 chunk 发 Range GET；失败重试一次（刷新 URL）。
+                    for attempt in 0..2 {
+                        if let Ok(Some(url)) = tg.get_download_url(&real_id).await {
+                            if let Ok(resp) = http
+                                .get(&url)
+                                .header("Range", format!("bytes={}-{}", s, e))
+                                .send()
+                                .await
+                            {
+                                if resp.status().is_success() {
+                                    got = Some(resp);
+                                    break;
+                                }
+                            }
+                        }
+                        if attempt == 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                    let resp = match got {
+                        Some(r) => r,
+                        None => {
+                            yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(
+                                "chunk range download failed".to_string(),
+                            ));
+                            return;
+                        }
+                    };
+                    let mut bs = resp.bytes_stream();
+                    while let Some(chunk) = bs.next().await {
+                        match chunk {
+                            Ok(bytes) => yield Ok::<_, std::io::Error>(bytes),
+                            Err(e) => {
+                                yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(
+                                    format!("chunk stream error: {}", e),
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                }
+            };
+
             return Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
                 .header("Content-Type", ct)
                 .header("Content-Disposition", cd)
                 .header("Accept-Ranges", "bytes")
                 .header("X-Content-Type-Options", "nosniff")
-                .body(Body::empty())
+                .header("Content-Range", content_range)
+                .header("Content-Length", content_len)
+                .body(Body::from_stream(body_stream))
                 .unwrap();
         }
 
-        // 并发预取：每个 chunk 的 getFile + 建连在前一个 chunk 仍在传输时就发起，最多
-        // PREFETCH 个在途；body 仍按 chunk 顺序流式输出（保序），单块不整体进内存。相比
-        // 旧的“逐块串行 getFile + 串行下载”，块间往返被重叠掉，明显提速。
+        // 否则整文件顺序流式（并发预取，保序）。已知总大小时带 Content-Length，让浏览器
+        // 显示下载进度 / 预计大小。每个 chunk 的 getFile + 建连在前一块仍在传时就发起，
+        // 最多 PREFETCH 个在途；body 按 chunk 顺序输出，单块不整体进内存。
         const PREFETCH: usize = 3;
         let tg = tg_service.clone();
         let http = client.clone();
@@ -287,13 +439,15 @@ async fn serve_file(
             }
         };
 
-        return Response::builder()
+        let mut builder = Response::builder()
             .header("Content-Type", ct)
             .header("Content-Disposition", cd)
             .header("Accept-Ranges", "bytes")
-            .header("X-Content-Type-Options", "nosniff")
-            .body(Body::from_stream(body_stream))
-            .unwrap();
+            .header("X-Content-Type-Options", "nosniff");
+        if let Some(t) = total {
+            builder = builder.header("Content-Length", t);
+        }
+        return builder.body(Body::from_stream(body_stream)).unwrap();
     }
 
     // Regular file - stream from Telegram
@@ -416,6 +570,7 @@ async fn resolve_and_serve(
                 headers,
                 force_download,
                 is_head,
+                Some(f.filesize),
             )
             .await
         }
@@ -430,6 +585,7 @@ async fn resolve_and_serve(
                     headers,
                     force_download,
                     is_head,
+                    None,
                 )
                 .await
             }
@@ -748,11 +904,45 @@ pub fn router() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::chunk_download_failed_response;
+    use super::{map_range_to_chunks, parse_single_range};
     use axum::http::StatusCode;
 
     #[test]
     fn manifest_chunk_failure_returns_bad_gateway() {
         let response = chunk_download_failed_response("chunk-1");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn parse_range_handles_forms_and_bounds() {
+        assert_eq!(parse_single_range("bytes=0-99", 1000), Some((0, 99)));
+        assert_eq!(parse_single_range("bytes=100-", 1000), Some((100, 999)));
+        assert_eq!(parse_single_range("bytes=-200", 1000), Some((800, 999)));
+        // suffix 超过总长 → 夹到整段
+        assert_eq!(parse_single_range("bytes=-5000", 1000), Some((0, 999)));
+        // end 越界夹到 total-1
+        assert_eq!(parse_single_range("bytes=0-99999", 1000), Some((0, 999)));
+        // 非法 / 多区间 / 起点越界 / 空文件 / 无前缀
+        assert_eq!(parse_single_range("bytes=999-0", 1000), None);
+        assert_eq!(parse_single_range("bytes=0-10,20-30", 1000), None);
+        assert_eq!(parse_single_range("bytes=1000-1001", 1000), None);
+        assert_eq!(parse_single_range("bytes=0-0", 0), None);
+        assert_eq!(parse_single_range("xyz=0-1", 1000), None);
+    }
+
+    #[test]
+    fn map_range_spans_chunks_with_short_tail() {
+        let cs = 100u64;
+        let total = 250u64; // 三块：[0,100) [100,200) [200,250)
+        assert_eq!(map_range_to_chunks(10, 40, cs, total), vec![(0, 10, 40)]);
+        assert_eq!(
+            map_range_to_chunks(50, 150, cs, total),
+            vec![(0, 50, 99), (1, 0, 50)]
+        );
+        assert_eq!(
+            map_range_to_chunks(0, 249, cs, total),
+            vec![(0, 0, 99), (1, 0, 99), (2, 0, 49)]
+        );
+        assert_eq!(map_range_to_chunks(210, 240, cs, total), vec![(2, 10, 40)]);
     }
 }
