@@ -6,13 +6,10 @@
     <title>{% block title %}tgState{% endblock %}</title>
     <link rel="stylesheet" href="/static/ui.css">
     <script>
-        // 防闪烁：首屏立即套用主题（默认深色）。
+        // 防闪烁：首屏立即套用主题（默认浅色）。
         (function () {
-            var pref = localStorage.getItem('tgstate_theme_pref') || 'dark';
-            var mode = pref === 'auto'
-                ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
-                : pref;
-            document.documentElement.setAttribute('data-theme', mode);
+            var p = localStorage.getItem('tgstate_theme_pref');
+            document.documentElement.setAttribute('data-theme', p === 'dark' ? 'dark' : 'light');
         })();
     </script>
 </head>
@@ -39,7 +36,7 @@
         </nav>
         <div class="sidebar-footer">
             <button type="button" class="nav-item theme-toggle-btn">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+                <span class="theme-ic"></span>
                 <span class="theme-label">主题</span>
             </button>
             <button type="button" class="nav-item js-logout" style="color: var(--danger);">
@@ -56,7 +53,7 @@
                 tgState
             </div>
             <button type="button" class="btn btn-ghost btn-icon theme-toggle-btn">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+                <span class="theme-ic"></span>
             </button>
         </header>
 

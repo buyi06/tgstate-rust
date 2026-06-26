@@ -274,30 +274,6 @@ pub fn set_share_password(
     Ok(rows > 0)
 }
 
-pub fn delete_file_by_message_id(pool: &DbPool, message_id: i64) -> Result<Option<String>, AppErrorKind> {
-    let conn = pool.get()?;
-    let pattern = format!("{}:%", message_id);
-
-    let file_id: Option<String> = conn
-        .query_row(
-            "SELECT file_id FROM files WHERE file_id LIKE ?1",
-            params![pattern],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if let Some(ref fid) = file_id {
-        conn.execute("DELETE FROM files WHERE file_id = ?1", params![fid])?;
-        tracing::info!(
-            "已从数据库中删除与消息ID {} 关联的文件: {}",
-            message_id,
-            fid
-        );
-    }
-
-    Ok(file_id)
-}
-
 pub fn get_app_settings_from_db(
     pool: &DbPool,
 ) -> Result<HashMap<String, Option<String>>, AppErrorKind> {

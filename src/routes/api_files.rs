@@ -12,6 +12,7 @@ use serde::Deserialize;
 use crate::config;
 use crate::database;
 use crate::error::http_error;
+use crate::events::build_file_event;
 use crate::state::AppState;
 use crate::telegram::service::TelegramService;
 
@@ -114,6 +115,63 @@ fn chunk_download_failed_response(chunk_id: &str) -> Response {
     .into_response()
 }
 
+/// 解析单区间 HTTP Range 为闭区间 [start, end]（0-based，含端点）。
+/// 支持 `bytes=a-b` / `bytes=a-`（至末尾）/ `bytes=-n`（末尾 n 字节）。
+/// 多区间、越界、非法一律返回 None（调用方据此退回 200 全量）。
+fn parse_single_range(header: &str, total: u64) -> Option<(u64, u64)> {
+    if total == 0 {
+        return None;
+    }
+    let spec = header.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None; // 多区间不支持
+    }
+    let (a, b) = spec.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    let (start, end) = if a.is_empty() {
+        // 末尾 n 字节：bytes=-n
+        let n: u64 = b.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        let n = n.min(total);
+        (total - n, total - 1)
+    } else {
+        let start: u64 = a.parse().ok()?;
+        let end: u64 = if b.is_empty() {
+            total - 1
+        } else {
+            b.parse().ok()?
+        };
+        (start, end.min(total - 1))
+    };
+    if start > end || start >= total {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// 把闭区间 [start, end] 映射到固定 `chunk_size` 切分下涉及的各 chunk，返回
+/// (chunk 下标, 块内起点, 块内终点(含))。末块更短由 `total` 约束。
+fn map_range_to_chunks(start: u64, end: u64, chunk_size: u64, total: u64) -> Vec<(usize, u64, u64)> {
+    let mut out = Vec::new();
+    if chunk_size == 0 || total == 0 || start > end || start >= total {
+        return out;
+    }
+    let end = end.min(total - 1);
+    let first = start / chunk_size;
+    let last = end / chunk_size;
+    for i in first..=last {
+        let g_start = i * chunk_size;
+        let g_end = ((i + 1) * chunk_size).min(total) - 1; // 该块全局闭区间终点
+        let s = start.max(g_start) - g_start;
+        let e = end.min(g_end) - g_start;
+        out.push((i as usize, s, e));
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn serve_file(
     state: &AppState,
     tg_service: &TelegramService,
@@ -122,6 +180,7 @@ async fn serve_file(
     headers: &HeaderMap,
     force_download: bool,
     is_head: bool,
+    total_size: Option<i64>,
 ) -> Response {
     // Parse composite file_id "message_id:real_file_id"
     let real_file_id = if let Some(pos) = file_id.find(':') {
@@ -219,19 +278,113 @@ async fn serve_file(
         let ct = guess_content_type(original_filename);
         let cd = content_disposition(original_filename, force_download);
 
+        // 总大小取自 DB 元数据（清单本身不记每块大小）。chunk 按固定
+        // TELEGRAM_CHUNK_SIZE 切分（仅末块更短），据此可把任意 Range 精确映射到涉及
+        // 的 chunk，从而支持大文件拖拽播放 / 断点续传。
+        let chunk_size = crate::constants::TELEGRAM_CHUNK_SIZE as u64;
+        let total = total_size.filter(|s| *s > 0).map(|s| s as u64);
+        // 仅当“块数 == ceil(total/chunk_size)”才相信固定分块假设，否则退回整文件流式，
+        // 避免历史上以不同分块大小上传的文件被错误切片。
+        let range_ok = total.is_some_and(|t| chunk_ids.len() as u64 == t.div_ceil(chunk_size));
+
         if is_head {
+            let mut b = Response::builder()
+                .header("Content-Type", ct)
+                .header("Content-Disposition", cd)
+                .header("Accept-Ranges", "bytes")
+                .header("X-Content-Type-Options", "nosniff");
+            if let Some(t) = total {
+                b = b.header("Content-Length", t);
+            }
+            return b.body(Body::empty()).unwrap();
+        }
+
+        // 单区间 Range 且固定分块假设成立 → 206 部分内容，只取涉及的 chunk。
+        let range_req = headers
+            .get("range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| total.and_then(|t| parse_single_range(h, t)));
+
+        if let (Some((start, end)), true) = (range_req, range_ok) {
+            let total = total.unwrap();
+            let selected: Vec<(String, u64, u64)> = map_range_to_chunks(start, end, chunk_size, total)
+                .into_iter()
+                .filter_map(|(i, s, e)| {
+                    chunk_ids.get(i).map(|c| {
+                        let real = c
+                            .split_once(':')
+                            .map(|(_, b)| b.to_string())
+                            .unwrap_or_else(|| c.clone());
+                        (real, s, e)
+                    })
+                })
+                .collect();
+            let content_len = end - start + 1;
+            let content_range = format!("bytes {}-{}/{}", start, end, total);
+
+            let tg = tg_service.clone();
+            let http = client.clone();
+            let body_stream = async_stream::stream! {
+                for (real_id, s, e) in selected {
+                    let mut got = None;
+                    // 取下载 URL 并对该 chunk 发 Range GET；失败重试一次（刷新 URL）。
+                    for attempt in 0..2 {
+                        if let Ok(Some(url)) = tg.get_download_url(&real_id).await {
+                            if let Ok(resp) = http
+                                .get(&url)
+                                .header("Range", format!("bytes={}-{}", s, e))
+                                .send()
+                                .await
+                            {
+                                if resp.status().is_success() {
+                                    got = Some(resp);
+                                    break;
+                                }
+                            }
+                        }
+                        if attempt == 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                    let resp = match got {
+                        Some(r) => r,
+                        None => {
+                            yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(
+                                "chunk range download failed".to_string(),
+                            ));
+                            return;
+                        }
+                    };
+                    let mut bs = resp.bytes_stream();
+                    while let Some(chunk) = bs.next().await {
+                        match chunk {
+                            Ok(bytes) => yield Ok::<_, std::io::Error>(bytes),
+                            Err(e) => {
+                                yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(
+                                    format!("chunk stream error: {}", e),
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                }
+            };
+
             return Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
                 .header("Content-Type", ct)
                 .header("Content-Disposition", cd)
                 .header("Accept-Ranges", "bytes")
                 .header("X-Content-Type-Options", "nosniff")
-                .body(Body::empty())
+                .header("Content-Range", content_range)
+                .header("Content-Length", content_len)
+                .body(Body::from_stream(body_stream))
                 .unwrap();
         }
 
-        // 并发预取：每个 chunk 的 getFile + 建连在前一个 chunk 仍在传输时就发起，最多
-        // PREFETCH 个在途；body 仍按 chunk 顺序流式输出（保序），单块不整体进内存。相比
-        // 旧的“逐块串行 getFile + 串行下载”，块间往返被重叠掉，明显提速。
+        // 否则整文件顺序流式（并发预取，保序）。已知总大小时带 Content-Length，让浏览器
+        // 显示下载进度 / 预计大小。每个 chunk 的 getFile + 建连在前一块仍在传时就发起，
+        // 最多 PREFETCH 个在途；body 按 chunk 顺序输出，单块不整体进内存。
         const PREFETCH: usize = 3;
         let tg = tg_service.clone();
         let http = client.clone();
@@ -287,13 +440,15 @@ async fn serve_file(
             }
         };
 
-        return Response::builder()
+        let mut builder = Response::builder()
             .header("Content-Type", ct)
             .header("Content-Disposition", cd)
             .header("Accept-Ranges", "bytes")
-            .header("X-Content-Type-Options", "nosniff")
-            .body(Body::from_stream(body_stream))
-            .unwrap();
+            .header("X-Content-Type-Options", "nosniff");
+        if let Some(t) = total {
+            builder = builder.header("Content-Length", t);
+        }
+        return builder.body(Body::from_stream(body_stream)).unwrap();
     }
 
     // Regular file - stream from Telegram
@@ -330,6 +485,12 @@ async fn serve_file(
         }
         if let Some(cl) = range_resp.headers().get("content-length") {
             builder = builder.header("Content-Length", cl);
+        }
+
+        // HEAD 请求只回头部，不回 body。此前 Range 分支漏判 is_head，会把整段
+        // 内容也回给 HEAD，既违反 HTTP 语义，又白白从 Telegram 拉一遍流。
+        if is_head {
+            return builder.body(Body::empty()).unwrap();
         }
 
         let stream = range_resp.bytes_stream();
@@ -372,24 +533,27 @@ async fn serve_file(
         .unwrap()
 }
 
-async fn download_file_short(
-    State(state): State<Arc<AppState>>,
-    Path(identifier): Path<String>,
-    Query(query): Query<DownloadQuery>,
-    headers: HeaderMap,
+/// 统一的“解析标识符并响应下载”逻辑，供短链 / 旧版双段链及各自的 HEAD 复用。
+///
+/// `legacy_filename` 区分两种路由形态：
+/// - `None`（短链 `/d/:identifier`）：DB 查不到即 404。
+/// - `Some(name)`（双段 `/d/:file_id/:filename`）：DB 查不到时，把 `identifier`
+///   当作真正的旧版直链（复合 file_id 直接写在 URL 中）回退处理，保持向后兼容。
+///
+/// 关键修复：此前双段路由直接拿 URL 第一段去问 Telegram，导致
+///   (1) 分享页给出的 `/d/<short_id>/<filename>` 因 short_id 不是 TG file_id 而恒 404；
+///   (2) 任何知道复合 file_id 的人都能绕过分享密码直接下载。
+/// 现在两种形态都先查 DB，命中且设了分享密码时一律校验解锁 cookie。
+async fn resolve_and_serve(
+    state: &AppState,
+    tg_service: &TelegramService,
+    identifier: &str,
+    legacy_filename: Option<&str>,
+    headers: &HeaderMap,
+    force_download: bool,
+    is_head: bool,
 ) -> Response {
-    // Validate identifier format
-    if invalid_identifier(&identifier) {
-        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
-    }
-
-    let tg_service = match get_telegram_service(&state) {
-        Ok(s) => s,
-        Err(e) => return e.into_response(),
-    };
-
-    let meta = database::get_file_by_id(&state.db_pool, &identifier);
-    match meta {
+    match database::get_file_by_id(&state.db_pool, identifier) {
         Ok(Some(f)) => {
             if let Some(ref hash) = f.share_password {
                 let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok());
@@ -399,24 +563,72 @@ async fn download_file_short(
                         .into_response();
                 }
             }
-            let force_download = query
-                .download
-                .as_deref()
-                .map_or(false, |v| v == "1" || v == "true");
-            let is_head = false; // Will be handled by axum method routing
             serve_file(
-                &state,
-                &tg_service,
+                state,
+                tg_service,
                 &f.file_id,
                 &f.filename,
-                &headers,
+                headers,
                 force_download,
                 is_head,
+                Some(f.filesize),
             )
             .await
         }
-        _ => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+        Ok(None) => match legacy_filename {
+            // 旧版直链：URL 第一段即复合 file_id，DB 无记录（也就无分享密码可校验）。
+            Some(name) => {
+                serve_file(
+                    state,
+                    tg_service,
+                    identifier,
+                    name,
+                    headers,
+                    force_download,
+                    is_head,
+                    None,
+                )
+                .await
+            }
+            None => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+        },
+        Err(e) => {
+            tracing::error!("查询文件元数据失败: {}", e);
+            http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response()
+        }
     }
+}
+
+fn want_force_download(query: &DownloadQuery) -> bool {
+    query
+        .download
+        .as_deref()
+        .map_or(false, |v| v == "1" || v == "true")
+}
+
+async fn download_file_short(
+    State(state): State<Arc<AppState>>,
+    Path(identifier): Path<String>,
+    Query(query): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if invalid_identifier(&identifier) {
+        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
+    }
+    let tg_service = match get_telegram_service(&state) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    resolve_and_serve(
+        &state,
+        &tg_service,
+        &identifier,
+        None,
+        &headers,
+        want_force_download(&query),
+        false,
+    )
+    .await
 }
 
 async fn download_file_short_head(
@@ -432,35 +644,16 @@ async fn download_file_short_head(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
-
-    let meta = database::get_file_by_id(&state.db_pool, &identifier);
-    match meta {
-        Ok(Some(f)) => {
-            if let Some(ref hash) = f.share_password {
-                let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok());
-                let id_for_cookie = f.short_id.as_deref().unwrap_or(&f.file_id);
-                if !crate::auth::share_unlocked(cookie_header, id_for_cookie, hash) {
-                    return http_error(StatusCode::UNAUTHORIZED, "需要分享密码", "share_locked")
-                        .into_response();
-                }
-            }
-            let force_download = query
-                .download
-                .as_deref()
-                .map_or(false, |v| v == "1" || v == "true");
-            serve_file(
-                &state,
-                &tg_service,
-                &f.file_id,
-                &f.filename,
-                &headers,
-                force_download,
-                true,
-            )
-            .await
-        }
-        _ => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
-    }
+    resolve_and_serve(
+        &state,
+        &tg_service,
+        &identifier,
+        None,
+        &headers,
+        want_force_download(&query),
+        true,
+    )
+    .await
 }
 
 async fn download_file_legacy(
@@ -476,18 +669,13 @@ async fn download_file_legacy(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
-
-    let force_download = query
-        .download
-        .as_deref()
-        .map_or(false, |v| v == "1" || v == "true");
-    serve_file(
+    resolve_and_serve(
         &state,
         &tg_service,
         &file_id,
-        &filename,
+        Some(&filename),
         &headers,
-        force_download,
+        want_force_download(&query),
         false,
     )
     .await
@@ -506,18 +694,13 @@ async fn download_file_legacy_head(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
-
-    let force_download = query
-        .download
-        .as_deref()
-        .map_or(false, |v| v == "1" || v == "true");
-    serve_file(
+    resolve_and_serve(
         &state,
         &tg_service,
         &file_id,
-        &filename,
+        Some(&filename),
         &headers,
-        force_download,
+        want_force_download(&query),
         true,
     )
     .await
@@ -542,6 +725,12 @@ async fn get_files_list(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(out)
 }
 
+/// 向 SSE 事件总线广播一条 delete 事件，让其它打开的页面实时移除该行。
+fn broadcast_delete(state: &AppState, file_id: &str) {
+    let ev = build_file_event("delete", file_id, None, None, None, None);
+    state.event_bus.publish(serde_json::to_string(&ev).unwrap_or_default());
+}
+
 async fn delete_file(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
@@ -554,9 +743,14 @@ async fn delete_file(
     tracing::info!("正在删除文件: {}", file_id);
 
     let result = tg_service.delete_file_with_chunks(&file_id).await;
+    // 不论 TG 删除是否完全成功，都尝试删一次 DB 记录；删到行就广播 delete，
+    // 让其它标签页实时移除该行。
+    let db_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
+    if db_deleted {
+        broadcast_delete(&state, &file_id);
+    }
 
     if result.main_message_deleted {
-        let db_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
         let db_status = if db_deleted {
             "deleted"
         } else {
@@ -573,23 +767,21 @@ async fn delete_file(
                 }
             }))
             .into_response();
-        } else {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "code": "partial_failure",
-                    "message": "部分分块删除失败",
-                    "details": result,
-                })),
-            )
-                .into_response();
         }
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "code": "partial_failure",
+                "message": "部分分块删除失败",
+                "details": result,
+            })),
+        )
+            .into_response();
     }
 
-    // TG deletion failed, try force-delete from DB
-    let force_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
-    if force_deleted {
+    // TG 主消息删除失败：若 DB 记录已强删，也算从面板移除成功。
+    if db_deleted {
         return Json(serde_json::json!({
             "status": "ok",
             "message": format!("文件 {} 已从数据库删除（Telegram 删除失败）。", file_id),
@@ -630,21 +822,34 @@ async fn batch_delete_files(
         Err(e) => return e.into_response(),
     };
 
+    // 适度并发删除（每个文件内部还会并发删自己的分块，故这里用较小并发度，避免对
+    // Telegram API 造成过大瞬时压力）。删到 DB 行的逐个广播 delete。
+    const BATCH_CONCURRENCY: usize = 4;
+    let results: Vec<(String, bool)> = stream::iter(payload.file_ids.into_iter())
+        .map(|fid| {
+            let tg = tg_service.clone();
+            let state = state.clone();
+            async move {
+                let result = tg.delete_file_with_chunks(&fid).await;
+                let db_deleted =
+                    database::delete_file_metadata(&state.db_pool, &fid).unwrap_or(false);
+                if db_deleted {
+                    broadcast_delete(&state, &fid);
+                }
+                (fid, result.main_message_deleted || db_deleted)
+            }
+        })
+        .buffer_unordered(BATCH_CONCURRENCY)
+        .collect()
+        .await;
+
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
-
-    for fid in &payload.file_ids {
-        let result = tg_service.delete_file_with_chunks(fid).await;
-        if result.main_message_deleted {
-            database::delete_file_metadata(&state.db_pool, fid).ok();
-            deleted.push(fid.clone());
+    for (fid, ok) in results {
+        if ok {
+            deleted.push(fid);
         } else {
-            // Try force delete from DB
-            if database::delete_file_metadata(&state.db_pool, fid).unwrap_or(false) {
-                deleted.push(fid.clone());
-            } else {
-                failed.push(fid.clone());
-            }
+            failed.push(fid);
         }
     }
 
@@ -722,11 +927,45 @@ pub fn router() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::chunk_download_failed_response;
+    use super::{map_range_to_chunks, parse_single_range};
     use axum::http::StatusCode;
 
     #[test]
     fn manifest_chunk_failure_returns_bad_gateway() {
         let response = chunk_download_failed_response("chunk-1");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn parse_range_handles_forms_and_bounds() {
+        assert_eq!(parse_single_range("bytes=0-99", 1000), Some((0, 99)));
+        assert_eq!(parse_single_range("bytes=100-", 1000), Some((100, 999)));
+        assert_eq!(parse_single_range("bytes=-200", 1000), Some((800, 999)));
+        // suffix 超过总长 → 夹到整段
+        assert_eq!(parse_single_range("bytes=-5000", 1000), Some((0, 999)));
+        // end 越界夹到 total-1
+        assert_eq!(parse_single_range("bytes=0-99999", 1000), Some((0, 999)));
+        // 非法 / 多区间 / 起点越界 / 空文件 / 无前缀
+        assert_eq!(parse_single_range("bytes=999-0", 1000), None);
+        assert_eq!(parse_single_range("bytes=0-10,20-30", 1000), None);
+        assert_eq!(parse_single_range("bytes=1000-1001", 1000), None);
+        assert_eq!(parse_single_range("bytes=0-0", 0), None);
+        assert_eq!(parse_single_range("xyz=0-1", 1000), None);
+    }
+
+    #[test]
+    fn map_range_spans_chunks_with_short_tail() {
+        let cs = 100u64;
+        let total = 250u64; // 三块：[0,100) [100,200) [200,250)
+        assert_eq!(map_range_to_chunks(10, 40, cs, total), vec![(0, 10, 40)]);
+        assert_eq!(
+            map_range_to_chunks(50, 150, cs, total),
+            vec![(0, 50, 99), (1, 0, 50)]
+        );
+        assert_eq!(
+            map_range_to_chunks(0, 249, cs, total),
+            vec![(0, 0, 99), (1, 0, 99), (2, 0, 49)]
+        );
+        assert_eq!(map_range_to_chunks(210, 240, cs, total), vec![(2, 10, 40)]);
     }
 }
