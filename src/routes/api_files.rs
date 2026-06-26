@@ -332,6 +332,12 @@ async fn serve_file(
             builder = builder.header("Content-Length", cl);
         }
 
+        // HEAD 请求只回头部，不回 body。此前 Range 分支漏判 is_head，会把整段
+        // 内容也回给 HEAD，既违反 HTTP 语义，又白白从 Telegram 拉一遍流。
+        if is_head {
+            return builder.body(Body::empty()).unwrap();
+        }
+
         let stream = range_resp.bytes_stream();
         return builder
             .body(Body::from_stream(stream.map(|r| {
@@ -372,24 +378,27 @@ async fn serve_file(
         .unwrap()
 }
 
-async fn download_file_short(
-    State(state): State<Arc<AppState>>,
-    Path(identifier): Path<String>,
-    Query(query): Query<DownloadQuery>,
-    headers: HeaderMap,
+/// 统一的“解析标识符并响应下载”逻辑，供短链 / 旧版双段链及各自的 HEAD 复用。
+///
+/// `legacy_filename` 区分两种路由形态：
+/// - `None`（短链 `/d/:identifier`）：DB 查不到即 404。
+/// - `Some(name)`（双段 `/d/:file_id/:filename`）：DB 查不到时，把 `identifier`
+///   当作真正的旧版直链（复合 file_id 直接写在 URL 中）回退处理，保持向后兼容。
+///
+/// 关键修复：此前双段路由直接拿 URL 第一段去问 Telegram，导致
+///   (1) 分享页给出的 `/d/<short_id>/<filename>` 因 short_id 不是 TG file_id 而恒 404；
+///   (2) 任何知道复合 file_id 的人都能绕过分享密码直接下载。
+/// 现在两种形态都先查 DB，命中且设了分享密码时一律校验解锁 cookie。
+async fn resolve_and_serve(
+    state: &AppState,
+    tg_service: &TelegramService,
+    identifier: &str,
+    legacy_filename: Option<&str>,
+    headers: &HeaderMap,
+    force_download: bool,
+    is_head: bool,
 ) -> Response {
-    // Validate identifier format
-    if invalid_identifier(&identifier) {
-        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
-    }
-
-    let tg_service = match get_telegram_service(&state) {
-        Ok(s) => s,
-        Err(e) => return e.into_response(),
-    };
-
-    let meta = database::get_file_by_id(&state.db_pool, &identifier);
-    match meta {
+    match database::get_file_by_id(&state.db_pool, identifier) {
         Ok(Some(f)) => {
             if let Some(ref hash) = f.share_password {
                 let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok());
@@ -399,24 +408,70 @@ async fn download_file_short(
                         .into_response();
                 }
             }
-            let force_download = query
-                .download
-                .as_deref()
-                .map_or(false, |v| v == "1" || v == "true");
-            let is_head = false; // Will be handled by axum method routing
             serve_file(
-                &state,
-                &tg_service,
+                state,
+                tg_service,
                 &f.file_id,
                 &f.filename,
-                &headers,
+                headers,
                 force_download,
                 is_head,
             )
             .await
         }
-        _ => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+        Ok(None) => match legacy_filename {
+            // 旧版直链：URL 第一段即复合 file_id，DB 无记录（也就无分享密码可校验）。
+            Some(name) => {
+                serve_file(
+                    state,
+                    tg_service,
+                    identifier,
+                    name,
+                    headers,
+                    force_download,
+                    is_head,
+                )
+                .await
+            }
+            None => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+        },
+        Err(e) => {
+            tracing::error!("查询文件元数据失败: {}", e);
+            http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response()
+        }
     }
+}
+
+fn want_force_download(query: &DownloadQuery) -> bool {
+    query
+        .download
+        .as_deref()
+        .map_or(false, |v| v == "1" || v == "true")
+}
+
+async fn download_file_short(
+    State(state): State<Arc<AppState>>,
+    Path(identifier): Path<String>,
+    Query(query): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if invalid_identifier(&identifier) {
+        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
+    }
+    let tg_service = match get_telegram_service(&state) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    resolve_and_serve(
+        &state,
+        &tg_service,
+        &identifier,
+        None,
+        &headers,
+        want_force_download(&query),
+        false,
+    )
+    .await
 }
 
 async fn download_file_short_head(
@@ -432,35 +487,16 @@ async fn download_file_short_head(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
-
-    let meta = database::get_file_by_id(&state.db_pool, &identifier);
-    match meta {
-        Ok(Some(f)) => {
-            if let Some(ref hash) = f.share_password {
-                let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok());
-                let id_for_cookie = f.short_id.as_deref().unwrap_or(&f.file_id);
-                if !crate::auth::share_unlocked(cookie_header, id_for_cookie, hash) {
-                    return http_error(StatusCode::UNAUTHORIZED, "需要分享密码", "share_locked")
-                        .into_response();
-                }
-            }
-            let force_download = query
-                .download
-                .as_deref()
-                .map_or(false, |v| v == "1" || v == "true");
-            serve_file(
-                &state,
-                &tg_service,
-                &f.file_id,
-                &f.filename,
-                &headers,
-                force_download,
-                true,
-            )
-            .await
-        }
-        _ => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
-    }
+    resolve_and_serve(
+        &state,
+        &tg_service,
+        &identifier,
+        None,
+        &headers,
+        want_force_download(&query),
+        true,
+    )
+    .await
 }
 
 async fn download_file_legacy(
@@ -476,18 +512,13 @@ async fn download_file_legacy(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
-
-    let force_download = query
-        .download
-        .as_deref()
-        .map_or(false, |v| v == "1" || v == "true");
-    serve_file(
+    resolve_and_serve(
         &state,
         &tg_service,
         &file_id,
-        &filename,
+        Some(&filename),
         &headers,
-        force_download,
+        want_force_download(&query),
         false,
     )
     .await
@@ -506,18 +537,13 @@ async fn download_file_legacy_head(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
-
-    let force_download = query
-        .download
-        .as_deref()
-        .map_or(false, |v| v == "1" || v == "true");
-    serve_file(
+    resolve_and_serve(
         &state,
         &tg_service,
         &file_id,
-        &filename,
+        Some(&filename),
         &headers,
-        force_download,
+        want_force_download(&query),
         true,
     )
     .await
