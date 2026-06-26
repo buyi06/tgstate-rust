@@ -147,16 +147,9 @@ async fn process_update(
         }
     }
 
-    // Handle edited/deleted messages
-    let edited = update
-        .edited_message
-        .as_ref()
-        .or(update.edited_channel_post.as_ref());
-    if let Some(msg) = edited {
-        if msg.text.is_none() && msg.document.is_none() && msg.photo.is_none() {
-            handle_deleted_message(msg, db_pool, event_bus).await;
-        }
-    }
+    // 注：Telegram 的 getUpdates 不推送“消息被删除”事件（edited_* 是编辑而非删除），
+    // 频道里手动删文件无法被动同步到本地 DB。此前“编辑后内容全空 = 删除”的判断几乎
+    // 从不触发，是无效逻辑，已移除；如需对账须另写主动轮询比对。
 }
 
 async fn handle_new_file(
@@ -321,22 +314,6 @@ async fn handle_get_reply(
         &text,
     )
     .await;
-}
-
-async fn handle_deleted_message(
-    message: &Message,
-    db_pool: &DbPool,
-    event_bus: &BroadcastEventBus,
-) {
-    let message_id = message.message_id;
-
-    match database::delete_file_by_message_id(db_pool, message_id) {
-        Ok(Some(file_id)) => {
-            let event = build_file_event("delete", &file_id, None, None, None, None);
-            event_bus.publish(serde_json::to_string(&event).unwrap_or_default());
-        }
-        _ => {}
-    }
 }
 
 async fn send_message(

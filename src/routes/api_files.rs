@@ -12,6 +12,7 @@ use serde::Deserialize;
 use crate::config;
 use crate::database;
 use crate::error::http_error;
+use crate::events::build_file_event;
 use crate::state::AppState;
 use crate::telegram::service::TelegramService;
 
@@ -724,6 +725,12 @@ async fn get_files_list(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(out)
 }
 
+/// 向 SSE 事件总线广播一条 delete 事件，让其它打开的页面实时移除该行。
+fn broadcast_delete(state: &AppState, file_id: &str) {
+    let ev = build_file_event("delete", file_id, None, None, None, None);
+    state.event_bus.publish(serde_json::to_string(&ev).unwrap_or_default());
+}
+
 async fn delete_file(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
@@ -736,9 +743,14 @@ async fn delete_file(
     tracing::info!("正在删除文件: {}", file_id);
 
     let result = tg_service.delete_file_with_chunks(&file_id).await;
+    // 不论 TG 删除是否完全成功，都尝试删一次 DB 记录；删到行就广播 delete，
+    // 让其它标签页实时移除该行。
+    let db_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
+    if db_deleted {
+        broadcast_delete(&state, &file_id);
+    }
 
     if result.main_message_deleted {
-        let db_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
         let db_status = if db_deleted {
             "deleted"
         } else {
@@ -755,23 +767,21 @@ async fn delete_file(
                 }
             }))
             .into_response();
-        } else {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "code": "partial_failure",
-                    "message": "部分分块删除失败",
-                    "details": result,
-                })),
-            )
-                .into_response();
         }
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "code": "partial_failure",
+                "message": "部分分块删除失败",
+                "details": result,
+            })),
+        )
+            .into_response();
     }
 
-    // TG deletion failed, try force-delete from DB
-    let force_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
-    if force_deleted {
+    // TG 主消息删除失败：若 DB 记录已强删，也算从面板移除成功。
+    if db_deleted {
         return Json(serde_json::json!({
             "status": "ok",
             "message": format!("文件 {} 已从数据库删除（Telegram 删除失败）。", file_id),
@@ -812,21 +822,34 @@ async fn batch_delete_files(
         Err(e) => return e.into_response(),
     };
 
+    // 适度并发删除（每个文件内部还会并发删自己的分块，故这里用较小并发度，避免对
+    // Telegram API 造成过大瞬时压力）。删到 DB 行的逐个广播 delete。
+    const BATCH_CONCURRENCY: usize = 4;
+    let results: Vec<(String, bool)> = stream::iter(payload.file_ids.into_iter())
+        .map(|fid| {
+            let tg = tg_service.clone();
+            let state = state.clone();
+            async move {
+                let result = tg.delete_file_with_chunks(&fid).await;
+                let db_deleted =
+                    database::delete_file_metadata(&state.db_pool, &fid).unwrap_or(false);
+                if db_deleted {
+                    broadcast_delete(&state, &fid);
+                }
+                (fid, result.main_message_deleted || db_deleted)
+            }
+        })
+        .buffer_unordered(BATCH_CONCURRENCY)
+        .collect()
+        .await;
+
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
-
-    for fid in &payload.file_ids {
-        let result = tg_service.delete_file_with_chunks(fid).await;
-        if result.main_message_deleted {
-            database::delete_file_metadata(&state.db_pool, fid).ok();
-            deleted.push(fid.clone());
+    for (fid, ok) in results {
+        if ok {
+            deleted.push(fid);
         } else {
-            // Try force delete from DB
-            if database::delete_file_metadata(&state.db_pool, fid).unwrap_or(false) {
-                deleted.push(fid.clone());
-            } else {
-                failed.push(fid.clone());
-            }
+            failed.push(fid);
         }
     }
 

@@ -107,6 +107,19 @@ async fn upload_file(
             )
         })?;
 
+    // 广播 add 事件：文件管理页（及其它打开的标签页）无需刷新即可实时出现新行。
+    if let Ok(Some(meta)) = database::get_file_by_id(&state.db_pool, &short_id) {
+        let ev = crate::events::build_file_event(
+            "add",
+            &meta.file_id,
+            Some(&meta.filename),
+            Some(meta.filesize),
+            Some(&meta.upload_date),
+            meta.short_id.as_deref(),
+        );
+        state.event_bus.publish(serde_json::to_string(&ev).unwrap_or_default());
+    }
+
     let download_path = format!("/d/{}", short_id);
     Ok(Json(serde_json::json!({
         "file_id": short_id,
