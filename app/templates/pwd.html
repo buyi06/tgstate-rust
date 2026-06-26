@@ -5,10 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>登录 · tgState</title>
     <link rel="stylesheet" href="/static/ui.css">
-    <script>(function(){var p=localStorage.getItem('tgstate_theme_pref')||'dark';var m=p==='auto'?(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):p;document.documentElement.setAttribute('data-theme',m);})();</script>
+    <script>(function(){var p=localStorage.getItem('tgstate_theme_pref');document.documentElement.setAttribute('data-theme',p==='dark'?'dark':'light');})();</script>
 </head>
 <body>
 <div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+<button type="button" class="theme-toggle-btn theme-fab" aria-label="切换主题"><span class="theme-ic"></span></button>
 <div class="center-page">
     <div class="center-card">
         <div class="brand-lg">

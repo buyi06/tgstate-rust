@@ -11,6 +11,8 @@ const ICONS = {
     ok: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>',
     err: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>',
     spin: '<svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.5"></path></svg>',
+    sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>',
+    moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"></path></svg>',
 };
 
 const Toast = {
@@ -145,20 +147,29 @@ const Utils = {
 };
 
 const Theme = {
-    init() { this.apply(localStorage.getItem('tgstate_theme_pref') || 'dark'); },
-    apply(mode) {
-        let t = mode;
-        if (mode === 'auto') t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-        document.documentElement.setAttribute('data-theme', t);
-        const label = mode === 'auto' ? '跟随系统' : (mode === 'dark' ? '深色' : '浅色');
-        document.querySelectorAll('.theme-label').forEach((l) => { l.textContent = label; });
+    init() {
+        const pref = localStorage.getItem('tgstate_theme_pref');
+        this.apply(pref === 'dark' ? 'dark' : 'light');
     },
-    cycle() {
-        const cur = localStorage.getItem('tgstate_theme_pref') || 'dark';
-        const next = cur === 'dark' ? 'light' : (cur === 'light' ? 'auto' : 'dark');
+    apply(mode) {
+        const isDark = mode === 'dark';
+        document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+        // 图标 / 文案 / aria 都反映“再点一下会切到的目标模式”。
+        document.querySelectorAll('.theme-toggle-btn').forEach((b) => {
+            const ic = b.querySelector('.theme-ic');
+            if (ic) ic.innerHTML = isDark ? ICONS.sun : ICONS.moon;
+            const label = b.querySelector('.theme-label');
+            if (label) label.textContent = isDark ? '浅色' : '深色';
+            b.setAttribute('aria-label', isDark ? '切换到浅色' : '切换到深色');
+            b.setAttribute('title', isDark ? '切换到浅色' : '切换到深色');
+        });
+    },
+    toggle() {
+        const cur = localStorage.getItem('tgstate_theme_pref') === 'dark' ? 'dark' : 'light';
+        const next = cur === 'dark' ? 'light' : 'dark';
         localStorage.setItem('tgstate_theme_pref', next);
         this.apply(next);
-        Toast.show('已切换：' + (next === 'auto' ? '跟随系统' : (next === 'dark' ? '深色' : '浅色')));
+        Toast.show(next === 'dark' ? '已切换深色' : '已切换浅色');
     },
 };
 
@@ -179,7 +190,7 @@ const Auth = {
 document.addEventListener('DOMContentLoaded', () => {
     Theme.init();
     document.querySelectorAll('.theme-toggle-btn').forEach((b) =>
-        b.addEventListener('click', (e) => { e.preventDefault(); Theme.cycle(); }));
+        b.addEventListener('click', (e) => { e.preventDefault(); Theme.toggle(); }));
     document.querySelectorAll('.js-logout').forEach((b) =>
         b.addEventListener('click', (e) => { e.preventDefault(); Auth.logout(); }));
 });
