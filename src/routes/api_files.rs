@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures::stream::{self, StreamExt};
@@ -533,6 +533,15 @@ async fn serve_file(
         .unwrap()
 }
 
+
+fn wants_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/html"))
+        .unwrap_or(false)
+}
+
 /// 统一的“解析标识符并响应下载”逻辑，供短链 / 旧版双段链及各自的 HEAD 复用。
 ///
 /// `legacy_filename` 区分两种路由形态：
@@ -563,6 +572,19 @@ async fn resolve_and_serve(
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&f.file_id);
                 if !crate::auth::share_unlocked(cookie_header, id_for_cookie, hash) {
+                    // 浏览器直接打开 /d/... 时返回解锁页（或 303 到 /share/），
+                    // curl/API 仍返回 JSON，避免破坏脚本下载。
+                    if wants_html(headers) {
+                        if is_head {
+                            return Response::builder()
+                                .status(StatusCode::UNAUTHORIZED)
+                                .header("Content-Type", "text/html; charset=utf-8")
+                                .body(Body::empty())
+                                .unwrap();
+                        }
+                        return Redirect::temporary(&format!("/share/{}", id_for_cookie))
+                            .into_response();
+                    }
                     return http_error(StatusCode::UNAUTHORIZED, "需要分享密码", "share_locked")
                         .into_response();
                 }
