@@ -3,12 +3,15 @@
 //  所有来自服务端 / Telegram 的值进入 innerHTML 前都经 escapeHtml。
 // ============================================================
 
-const escapeHtml = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-}[c]));
+// 不要再声明顶层 const escapeHtml：ui.js 已导出 window.escapeHtml。
+// 经典脚本共享全局词法作用域，重复 const 会让本文件整段解析失败，
+// 导致复制/密码/删除按钮全部无响应。
 
 document.addEventListener('DOMContentLoaded', () => {
     const Toast = window.Toast, Modal = window.Modal, Utils = window.Utils;
+    const escapeHtml = window.escapeHtml || ((v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c])));
     if (!Toast || !Modal || !Utils) {
         console.error('ui.js not loaded');
         return;
@@ -99,9 +102,9 @@ document.addEventListener('DOMContentLoaded', () => {
             <td class="text-sm muted">${date}</td>
             <td class="col-actions"><div class="row-actions">
                 <a href="${url}" class="btn btn-ghost btn-icon btn-sm" title="下载">${ICO.download}</a>
-                <button class="btn btn-ghost btn-icon btn-sm copy-link-btn" title="复制链接">${ICO.copy}</button>
-                <button class="btn btn-ghost btn-icon btn-sm js-lock" title="分享密码">${ICO.lock}</button>
-                <button class="btn btn-ghost btn-icon btn-sm js-delete" data-file-id="${fid}" title="删除">${ICO.trash}</button>
+                <button type="button" class="btn btn-ghost btn-icon btn-sm copy-link-btn" title="复制链接">${ICO.copy}</button>
+                <button type="button" class="btn btn-ghost btn-icon btn-sm js-lock" title="分享密码">${ICO.lock}</button>
+                <button type="button" class="btn btn-ghost btn-icon btn-sm js-delete" data-file-id="${fid}" title="删除">${ICO.trash}</button>
             </div></td>`;
         listBody.prepend(tr);
     }
@@ -261,6 +264,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch('/api/batch_delete', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
                 body: JSON.stringify({ file_ids: ids }),
             });
             const data = await res.json().catch(() => ({}));
