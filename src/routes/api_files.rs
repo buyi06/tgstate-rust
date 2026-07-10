@@ -749,10 +749,14 @@ async fn delete_file(
     let result = match tokio::time::timeout(std::time::Duration::from_secs(12), tg_service.delete_file_with_chunks(&file_id)).await {
             Ok(r) => r,
             Err(_) => crate::telegram::service::DeleteResult {
+                status: "timeout".into(),
+                main_file_id: file_id.clone(),
+                deleted_chunks: vec![],
+                failed_chunks: vec![],
                 main_message_deleted: false,
-                chunks_deleted: 0,
-                chunks_failed: 0,
-                error: Some("telegram delete timeout".into()),
+                main_delete_reason: "timeout".into(),
+                is_manifest: false,
+                reason: "telegram delete timeout".into(),
             },
         };
     // 不论 TG 删除是否完全成功，都尝试删一次 DB 记录；删到行就广播 delete，
