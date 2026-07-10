@@ -9,6 +9,10 @@ const escapeHtml = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => 
 
 document.addEventListener('DOMContentLoaded', () => {
     const Toast = window.Toast, Modal = window.Modal, Utils = window.Utils;
+    if (!Toast || !Modal || !Utils) {
+        console.error('ui.js not loaded');
+        return;
+    }
 
     const grid = document.getElementById('image-grid');
     const isGallery = !!grid;
@@ -35,9 +39,34 @@ document.addEventListener('DOMContentLoaded', () => {
         return String(v).split(' ')[0].split('T')[0];
     };
 
+    function rowDomId(fileId) {
+        return 'file-item-' + String(fileId || '').split(':').join('-');
+    }
+
     function removeItem(fileId) {
-        const el = document.getElementById('file-item-' + String(fileId).replace(':', '-'));
+        if (!fileId) return;
+        let el = document.getElementById(rowDomId(fileId));
+        if (!el) {
+            const id = String(fileId);
+            el = document.querySelector('.file-item[data-file-id="' + CSS.escape(id) + '"]')
+                || document.querySelector('.file-item[data-short-id="' + CSS.escape(id) + '"]');
+        }
         if (el) el.remove();
+        if (typeof updateBatch === 'function') updateBatch();
+    }
+
+    function apiIdFor(itemOrId) {
+        if (!itemOrId) return '';
+        if (typeof itemOrId === 'string') return itemOrId;
+        return itemOrId.dataset.shortId || itemOrId.dataset.fileId || '';
+    }
+
+    function absoluteFileUrl(item) {
+        let url = (item && item.dataset.fileUrl) || '';
+        if (!url && item && item.dataset.shortId) url = '/d/' + item.dataset.shortId;
+        if (!url && item && item.dataset.fileId) url = '/d/' + item.dataset.fileId;
+        if (url.startsWith('/')) url = window.location.origin + url;
+        return url;
     }
 
     // ---- SSE 实时新增（仅文件管理页，事件来自 Bot 摄取，含真实 composite file_id） ----
@@ -56,7 +85,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const tr = document.createElement('tr');
         tr.className = 'file-item';
-        tr.id = 'file-item-' + String(rawId).replace(':', '-');
+        tr.id = rowDomId(rawId);
         tr.dataset.fileId = rawId;
         tr.dataset.shortId = file.short_id || '';
         tr.dataset.filename = file.filename || '';
@@ -78,38 +107,55 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ---- 删除 ----
-    async function deleteFile(fileId) {
-        if (!fileId) return;
-        const ok = await Modal.confirm('删除文件', '确定删除此文件吗？此操作不可撤销。', { danger: true, okText: '删除' });
+    async function deleteFile(fileId, filename) {
+        if (!fileId) { Toast.show('缺少文件标识', 'error'); return; }
+        const ok = await Modal.confirm('删除文件', '确定删除「' + (filename || fileId) + '」？此操作不可恢复。', { danger: true, okText: '删除' });
         if (!ok) return;
+        Toast.show('正在删除…');
         try {
-            const res = await fetch('/api/files/' + encodeURIComponent(fileId), { method: 'DELETE' });
+            const res = await fetch('/api/files/' + encodeURIComponent(fileId), {
+                method: 'DELETE',
+                credentials: 'same-origin'
+            });
+            if (res.status === 401) {
+                Toast.show('请先登录', 'error');
+                setTimeout(() => { location.href = '/pwd.html'; }, 500);
+                return;
+            }
             const data = await res.json().catch(() => ({}));
             if (res.ok && data.status === 'ok') {
                 removeItem(fileId);
-                Toast.show('已删除');
-                updateBatch();
+                // also try remove by short id/file id variants already handled in removeItem
+                Toast.show(data.message || '已删除');
             } else {
-                Toast.show((data.detail && data.detail.message) || data.message || '删除失败', 'error');
+                Toast.show((data.detail && data.detail.message) || data.message || ('删除失败(' + res.status + ')'), 'error');
             }
         } catch (e) { Toast.show('网络错误', 'error'); }
     }
 
-    // ---- 分享密码 ----
+ // ---- 分享密码 ----
     async function setSharePassword(item) {
-        const fid = item.dataset.fileId;
+        const fid = apiIdFor(item);
+        if (!fid) { Toast.show('缺少文件标识', 'error'); return; }
         const has = item.dataset.hasPassword === 'true';
         const val = await Modal.prompt(
             has ? '修改分享密码' : '设置分享密码',
-            has ? '输入新密码；留空并确定可清除密码。' : '设置后，访客打开分享链接需输入密码才能下载。',
-            { placeholder: has ? '留空 = 清除密码' : '输入访问密码', okText: '保存' }
+            has ? '输入新密码；留空并确定可清除密码。' : '设置后，访客打开分享链接需输入密码。',
+            { placeholder: has ? '留空 = 清除密码' : '输入分享密码', okText: '保存', inputType: 'password' }
         );
         if (val === null) return;
         try {
             const res = await fetch('/api/files/' + encodeURIComponent(fid) + '/share-password', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password: val }),
             });
+            if (res.status === 401) {
+                Toast.show('请先登录', 'error');
+                setTimeout(() => { location.href = '/pwd.html'; }, 500);
+                return;
+            }
             const data = await res.json().catch(() => ({}));
             if (res.ok) {
                 const nowHas = !!data.has_password;
@@ -118,29 +164,36 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (badge) badge.style.display = nowHas ? '' : 'none';
                 Toast.show(nowHas ? '已设置分享密码' : '已清除分享密码');
             } else {
-                Toast.show((data.detail && data.detail.message) || '操作失败', 'error');
+                Toast.show((data.detail && data.detail.message) || data.message || ('设置失败(' + res.status + ')'), 'error');
             }
         } catch (e) { Toast.show('网络错误', 'error'); }
     }
 
-    // ---- 行内操作委托（复制 / 密码 / 删除） ----
+ // ---- 行内操作委托（复制 / 密码 / 删除） ----
     document.addEventListener('click', (e) => {
         const copyBtn = e.target.closest('.copy-link-btn');
         if (copyBtn) {
+            e.preventDefault();
             const it = copyBtn.closest('.file-item');
-            if (it) Utils.copy(it.dataset.fileUrl || ('/d/' + it.dataset.shortId));
+            if (!it) return;
+            const url = absoluteFileUrl(it);
+            if (!url) { Toast.show('无可用链接', 'error'); return; }
+            Utils.copy(url);
             return;
         }
         const lockBtn = e.target.closest('.js-lock');
         if (lockBtn) {
+            e.preventDefault();
             const it = lockBtn.closest('.file-item');
             if (it) setSharePassword(it);
             return;
         }
         const delBtn = e.target.closest('.js-delete');
         if (delBtn) {
+            e.preventDefault();
             const it = delBtn.closest('.file-item');
-            deleteFile(delBtn.dataset.fileId || (it && it.dataset.fileId));
+            const id = apiIdFor(it) || delBtn.dataset.fileId;
+            deleteFile(id, it && it.dataset.filename);
         }
     });
 

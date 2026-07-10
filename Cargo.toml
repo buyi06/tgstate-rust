@@ -1,6 +1,6 @@
 [package]
 name = "tgstate"
-version = "2.1.2"
+version = "2.1.3"
 edition = "2021"
 description = "A Telegram-based private file storage system"
 rust-version = "1.82"

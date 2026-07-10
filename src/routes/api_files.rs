@@ -746,7 +746,15 @@ async fn delete_file(
 
     tracing::info!("正在删除文件: {}", file_id);
 
-    let result = tg_service.delete_file_with_chunks(&file_id).await;
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(12), tg_service.delete_file_with_chunks(&file_id)).await {
+            Ok(r) => r,
+            Err(_) => crate::telegram::service::DeleteResult {
+                main_message_deleted: false,
+                chunks_deleted: 0,
+                chunks_failed: 0,
+                error: Some("telegram delete timeout".into()),
+            },
+        };
     // 不论 TG 删除是否完全成功，都尝试删一次 DB 记录；删到行就广播 delete，
     // 让其它标签页实时移除该行。
     let db_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
