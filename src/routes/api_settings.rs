@@ -261,8 +261,9 @@ async fn reset_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn set_password(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<PasswordRequest>,
-) -> Result<Json<serde_json::Value>, crate::error::AppError> {
+) -> Result<impl IntoResponse, crate::error::AppError> {
     let db_pool = &state.db_pool;
     let password = payload.password.trim().to_string();
 
@@ -287,6 +288,7 @@ async fn set_password(
         })?;
     // Random session token, independent of the password.
     let session_token = auth::generate_session_token();
+    let cookie = auth::build_cookie(&session_token, is_https(&headers));
 
     let mut current = database::get_app_settings_from_db(db_pool).unwrap_or_default();
     current.insert("PASS_WORD".into(), Some(hashed));
@@ -303,10 +305,13 @@ async fn set_password(
     let _ = state::apply_runtime_settings(state.clone(), false).await;
     tracing::info!("密码已成功设置");
 
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "message": "密码已成功设置。"
-    })))
+    Ok((
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({
+            "status": "ok",
+            "message": "密码已成功设置。"
+        })),
+    ))
 }
 
 async fn verify_bot(

@@ -61,7 +61,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function apiIdFor(itemOrId) {
         if (!itemOrId) return '';
         if (typeof itemOrId === 'string') return itemOrId;
-        return itemOrId.dataset.shortId || itemOrId.dataset.fileId || '';
+        // Prefer composite Telegram file_id for delete (needs msg:file).
+        // short_id is fine for share-password (DB accepts either).
+        return itemOrId.dataset.fileId || itemOrId.dataset.shortId || '';
     }
 
     function absoluteFileUrl(item) {

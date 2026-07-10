@@ -96,15 +96,33 @@ async fn login(
     }
 }
 
-async fn logout(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // 失效服务端 session token，使所有已下发的 cookie（含可能被窃取的）立即作废。
-    // 仅在确有 token 时轮换；未设密码场景 token 本就为空。
+async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    // 仅当请求带有有效 session cookie 时才轮换服务端 SESSION_TOKEN。
+    // 否则任何人 POST /api/auth/logout 都能把管理员踢下线。
+    // 无有效会话时仍清 cookie，方便浏览器侧清理本地状态。
+    let active_pwd = config::get_active_password(&state.settings, &state.db_pool);
     let mut current = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
-    let has_token = current
+    let server_token = current
         .get("SESSION_TOKEN")
         .and_then(|v| v.as_deref())
-        .map_or(false, |t| !t.is_empty());
-    if has_token {
+        .unwrap_or("");
+    let cookie = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|hv| hv.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|part| {
+                let kv = part.trim();
+                kv.split_once('=')
+                    .filter(|(k, _)| *k == auth::COOKIE_NAME)
+                    .map(|(_, v)| v)
+            })
+        })
+        .unwrap_or("");
+    let has_valid_session = !server_token.is_empty()
+        && active_pwd.as_deref().map_or(false, |p| !p.is_empty())
+        && auth::secure_compare(cookie, server_token);
+
+    if has_valid_session {
         current.insert(
             "SESSION_TOKEN".to_string(),
             Some(auth::generate_session_token()),

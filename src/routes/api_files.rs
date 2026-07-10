@@ -336,7 +336,7 @@ async fn serve_file(
                                 .send()
                                 .await
                             {
-                                if resp.status().is_success() {
+                                if resp.status().as_u16() == 206 {
                                     got = Some(resp);
                                     break;
                                 }
@@ -602,8 +602,10 @@ async fn resolve_and_serve(
             .await
         }
         Ok(None) => match legacy_filename {
-            // 旧版直链：URL 第一段即复合 file_id，DB 无记录（也就无分享密码可校验）。
-            Some(name) => {
+            // 旧版直链：URL 第一段即复合 file_id。无 DB 行时无法校验分享密码，
+            // 为避免绕过，仅当 identifier 看起来不像 short_id 且含 ':' 时才允许
+            // 直连 TG（兼容 bot `get` 与历史链接）；short_id 形态一律 404。
+            Some(name) if identifier.contains(':') => {
                 serve_file(
                     state,
                     tg_service,
@@ -616,7 +618,9 @@ async fn resolve_and_serve(
                 )
                 .await
             }
-            None => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+            Some(_) | None => {
+                http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response()
+            }
         },
         Err(e) => {
             tracing::error!("查询文件元数据失败: {}", e);
@@ -766,26 +770,56 @@ async fn delete_file(
         Err(e) => return e.into_response(),
     };
 
-    tracing::info!("正在删除文件: {}", file_id);
+    // Resolve short_id → composite Telegram file_id. TG delete requires
+    // `message_id:file_id`; short_id alone always fails with Invalid file_id format.
+    let (tg_id, db_id) = match database::get_file_by_id(&state.db_pool, &file_id) {
+        Ok(Some(f)) => (f.file_id.clone(), f.file_id),
+        Ok(None) => (file_id.clone(), file_id.clone()),
+        Err(e) => {
+            tracing::error!("删除前查询文件失败: {}", e);
+            return http_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "查询文件失败",
+                "db_error",
+            )
+            .into_response();
+        }
+    };
 
-    let result = match tokio::time::timeout(std::time::Duration::from_secs(12), tg_service.delete_file_with_chunks(&file_id)).await {
-            Ok(r) => r,
-            Err(_) => crate::telegram::service::DeleteResult {
-                status: "timeout".into(),
-                main_file_id: file_id.clone(),
-                deleted_chunks: vec![],
-                failed_chunks: vec![],
-                main_message_deleted: false,
-                main_delete_reason: "timeout".into(),
-                is_manifest: false,
-                reason: "telegram delete timeout".into(),
-            },
-        };
-    // 不论 TG 删除是否完全成功，都尝试删一次 DB 记录；删到行就广播 delete，
-    // 让其它标签页实时移除该行。
-    let db_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
+    tracing::info!("正在删除文件: {} (tg={})", file_id, tg_id);
+
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tg_service.delete_file_with_chunks(&tg_id),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => crate::telegram::service::DeleteResult {
+            status: "timeout".into(),
+            main_file_id: tg_id.clone(),
+            deleted_chunks: vec![],
+            failed_chunks: vec![],
+            main_message_deleted: false,
+            main_delete_reason: "timeout".into(),
+            is_manifest: false,
+            reason: "telegram delete timeout".into(),
+        },
+    };
+
+    // Only drop the DB row after TG main message is gone (or already absent).
+    // Keeps panel/channel consistent: failed TG delete leaves the row so the
+    // user can retry instead of creating silent channel orphans.
+    let db_deleted = if result.main_message_deleted {
+        database::delete_file_metadata(&state.db_pool, &db_id).unwrap_or(false)
+    } else {
+        false
+    };
     if db_deleted {
-        broadcast_delete(&state, &file_id);
+        broadcast_delete(&state, &db_id);
+        if file_id != db_id {
+            broadcast_delete(&state, &file_id);
+        }
     }
 
     if result.main_message_deleted {
@@ -811,21 +845,11 @@ async fn delete_file(
             Json(serde_json::json!({
                 "status": "error",
                 "code": "partial_failure",
-                "message": "部分分块删除失败",
+                "message": "主文件已删，但部分分块删除失败",
                 "details": result,
             })),
         )
             .into_response();
-    }
-
-    // TG 主消息删除失败：若 DB 记录已强删，也算从面板移除成功。
-    if db_deleted {
-        return Json(serde_json::json!({
-            "status": "ok",
-            "message": format!("文件 {} 已从数据库删除（Telegram 删除失败）。", file_id),
-            "details": result,
-        }))
-        .into_response();
     }
 
     (
@@ -833,7 +857,7 @@ async fn delete_file(
         Json(serde_json::json!({
             "status": "error",
             "code": "delete_failed",
-            "message": "删除失败",
+            "message": "Telegram 删除失败，数据库记录已保留以便重试",
             "details": result,
         })),
     )
@@ -868,13 +892,24 @@ async fn batch_delete_files(
             let tg = tg_service.clone();
             let state = state.clone();
             async move {
-                let result = tg.delete_file_with_chunks(&fid).await;
-                let db_deleted =
-                    database::delete_file_metadata(&state.db_pool, &fid).unwrap_or(false);
+                let (tg_id, db_id) = match database::get_file_by_id(&state.db_pool, &fid) {
+                    Ok(Some(f)) => (f.file_id.clone(), f.file_id),
+                    _ => (fid.clone(), fid.clone()),
+                };
+                let result = tg.delete_file_with_chunks(&tg_id).await;
+                let db_deleted = if result.main_message_deleted {
+                    database::delete_file_metadata(&state.db_pool, &db_id).unwrap_or(false)
+                } else {
+                    false
+                };
                 if db_deleted {
-                    broadcast_delete(&state, &fid);
+                    broadcast_delete(&state, &db_id);
+                    if fid != db_id {
+                        broadcast_delete(&state, &fid);
+                    }
                 }
-                (fid, result.main_message_deleted || db_deleted)
+                // Success only when TG main is gone (DB may already be missing).
+                (fid, result.main_message_deleted)
             }
         })
         .buffer_unordered(BATCH_CONCURRENCY)

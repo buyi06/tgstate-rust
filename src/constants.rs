@@ -12,13 +12,16 @@ pub const HTTP_TIMEOUT_METADATA_SECS: u64 = 30;
 
 /// Rate limit: login attempts per window
 pub const RATE_LIMIT_LOGIN_MAX: u32 = 5;
+/// Rate limit: share-unlock password attempts per window (argon2 is expensive)
+pub const RATE_LIMIT_SHARE_UNLOCK_MAX: u32 = 10;
 /// Rate limit: upload requests per window
 pub const RATE_LIMIT_UPLOAD_MAX: u32 = 10;
 /// Rate limit: general API requests per window
 pub const RATE_LIMIT_API_MAX: u32 = 120;
 /// Rate limit: public download/share requests per window. Covers `/d/*` and
-/// `/share/*`. Higher than API because legitimate browsers issue many of
-/// these per page load (HTML + thumbnails + Range requests for video).
+/// `/share/*` (except unlock POST, which has its own tighter bucket). Higher
+/// than API because legitimate browsers issue many of these per page load
+/// (HTML + thumbnails + Range requests for video).
 pub const RATE_LIMIT_DOWNLOAD_MAX: u32 = 300;
 /// Rate limit: window duration in seconds
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;

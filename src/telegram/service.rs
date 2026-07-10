@@ -199,36 +199,65 @@ impl TelegramService {
     }
 
     pub async fn delete_message(&self, message_id: i64) -> (bool, String) {
-        let url = self.api_url("deleteMessage");
-        match self
-            .client
-            .post(&url)
-            .json(&serde_json::json!({
-                "chat_id": self.channel_name,
-                "message_id": message_id
-            }))
-            .timeout(std::time::Duration::from_secs(constants::HTTP_TIMEOUT_METADATA_SECS))
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                let data: serde_json::Value = resp.json().await.unwrap_or_default();
-                if data["ok"].as_bool() == Some(true) {
-                    (true, "deleted".into())
-                } else {
+        // Align with upload: retry a few times on 429 / transient network errors.
+        // Without this, rate-limited deletes leave channel orphans while the panel
+        // already removed the DB row.
+        let max_attempts = 3u32;
+        let mut last_reason = "error".to_string();
+
+        for attempt in 0..max_attempts {
+            let url = self.api_url("deleteMessage");
+            match self
+                .client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "chat_id": self.channel_name,
+                    "message_id": message_id
+                }))
+                .timeout(std::time::Duration::from_secs(constants::HTTP_TIMEOUT_METADATA_SECS))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let data: serde_json::Value = resp.json().await.unwrap_or_default();
+                    if let Some(wait) = retry_after_secs(status, &data) {
+                        last_reason = format!("rate_limited_{wait}s");
+                        tracing::warn!(
+                            "deleteMessage 429 (attempt {}/{}): waiting {}s",
+                            attempt + 1,
+                            max_attempts,
+                            wait
+                        );
+                        tokio::time::sleep(Duration::from_secs(wait)).await;
+                        continue;
+                    }
+                    if data["ok"].as_bool() == Some(true) {
+                        return (true, "deleted".into());
+                    }
                     let desc = data["description"].as_str().unwrap_or("");
                     if desc.contains("not found") {
-                        (true, "not_found".into())
-                    } else {
-                        (false, "error".into())
+                        return (true, "not_found".into());
+                    }
+                    last_reason = "error".into();
+                    // Non-retryable application error (e.g. no rights)
+                    break;
+                }
+                Err(e) => {
+                    last_reason = "error".into();
+                    tracing::error!(
+                        "deleteMessage failed (attempt {}/{}): {}",
+                        attempt + 1,
+                        max_attempts,
+                        self.scrub(e.to_string())
+                    );
+                    if attempt + 1 < max_attempts {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
             }
-            Err(e) => {
-                tracing::error!("deleteMessage failed: {}", self.scrub(e.to_string()));
-                (false, "error".into())
-            }
         }
+        (false, last_reason)
     }
 
     pub async fn delete_file_with_chunks(&self, file_id: &str) -> DeleteResult {
