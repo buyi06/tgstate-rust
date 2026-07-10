@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>{% block title %}tgState{% endblock %}</title>
-    <link rel="stylesheet" href="/static/ui.css">
+    <link rel="stylesheet" href="/static/ui.css?v=6.0">
     <script>
         // 防闪烁：首屏立即套用主题（默认浅色）。
         (function () {
@@ -12,7 +12,7 @@
             document.documentElement.setAttribute('data-theme', p === 'dark' ? 'dark' : 'light');
         })();
     </script>
-    <script src="/static/ui.js?v=5.3"></script>
+    <script src="/static/ui.js?v=6.0"></script>
 </head>
 <body>
 <div class="app-layout">

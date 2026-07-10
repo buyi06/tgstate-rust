@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>{{ file.filename }} · tgState</title>
-    <link rel="stylesheet" href="/static/ui.css">
+    <link rel="stylesheet" href="/static/ui.css?v=6.0">
     <script>(function(){var p=localStorage.getItem('tgstate_theme_pref');document.documentElement.setAttribute('data-theme',p==='dark'?'dark':'light');})();</script>
 </head>
 <body>
-<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div></div>
 <button type="button" class="theme-toggle-btn theme-fab" aria-label="切换主题"><span class="theme-ic"></span></button>
 <div class="center-page">
     <div class="center-card wide">
@@ -45,7 +45,7 @@
         <p class="powered">Powered by Telegram</p>
     </div>
 </div>
-<script src="/static/ui.js"></script>
+<script src="/static/ui.js?v=6.0"></script>
 <script>
     document.querySelectorAll('.js-copy').forEach(function (b) {
         b.addEventListener('click', function () {
