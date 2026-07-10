@@ -67,7 +67,7 @@ fn enrich_files(files: &[database::FileMetadata]) -> Vec<serde_json::Value> {
                 "upload_date": f.upload_date,
                 "upload_date_short": upload_date_short,
                 "display_id": display_id,
-                "has_password": f.share_password.is_some(),
+                "has_password": f.has_share_password(),
             })
         })
         .collect()
@@ -163,7 +163,7 @@ async fn share_page(
                 .unwrap_or(&f.file_id);
 
             // 分享密码：未解锁则渲染密码输入页（解锁后写 sp_<id> cookie，再访问即放行）。
-            if let Some(ref hash) = f.share_password {
+            if let Some(ref hash) = f.share_password.filter(|h| !h.trim().is_empty()) {
                 let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok());
                 if !crate::auth::share_unlocked(cookie_header, display_id, hash) {
                     let mut ctx = tera::Context::new();

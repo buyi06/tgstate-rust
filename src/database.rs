@@ -204,6 +204,16 @@ pub struct FileMetadata {
     pub share_password: Option<String>,
 }
 
+impl FileMetadata {
+    /// True only when a non-empty share password hash is present.
+    pub fn has_share_password(&self) -> bool {
+        self.share_password
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
+}
+
 pub fn get_all_files(pool: &DbPool) -> Result<Vec<FileMetadata>, AppErrorKind> {
     let conn = pool.get()?;
     let mut stmt = conn
@@ -219,7 +229,7 @@ pub fn get_all_files(pool: &DbPool) -> Result<Vec<FileMetadata>, AppErrorKind> {
                 filesize: row.get(2)?,
                 upload_date: row.get::<_, String>(3).unwrap_or_default(),
                 short_id: row.get(4).ok(),
-                share_password: row.get(5).ok(),
+                share_password: norm_share_password(row.get(5).ok()),
             })
         })?
         .filter_map(|r| r.ok())
@@ -240,7 +250,7 @@ pub fn get_file_by_id(pool: &DbPool, identifier: &str) -> Result<Option<FileMeta
                 upload_date: row.get::<_, String>(2).unwrap_or_default(),
                 file_id: row.get(3)?,
                 short_id: row.get(4).ok(),
-                share_password: row.get(5).ok(),
+                share_password: norm_share_password(row.get(5).ok()),
             })
         },
     );
@@ -252,10 +262,18 @@ pub fn get_file_by_id(pool: &DbPool, identifier: &str) -> Result<Option<FileMeta
     }
 }
 
+/// Treat empty / whitespace-only share passwords as absent.
+fn norm_share_password(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 pub fn delete_file_metadata(pool: &DbPool, file_id: &str) -> Result<bool, AppErrorKind> {
     let conn = pool.get()?;
-    let rows = conn
-        .execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+    // Accept either composite file_id or short_id so UI / API callers can use either.
+    let rows = conn.execute(
+        "DELETE FROM files WHERE file_id = ?1 OR short_id = ?1",
+        params![file_id],
+    )?;
     Ok(rows > 0)
 }
 

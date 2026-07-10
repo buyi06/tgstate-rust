@@ -555,9 +555,13 @@ async fn resolve_and_serve(
 ) -> Response {
     match database::get_file_by_id(&state.db_pool, identifier) {
         Ok(Some(f)) => {
-            if let Some(ref hash) = f.share_password {
+            if let Some(ref hash) = f.share_password.filter(|h| !h.trim().is_empty()) {
                 let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok());
-                let id_for_cookie = f.short_id.as_deref().unwrap_or(&f.file_id);
+                let id_for_cookie = f
+                    .short_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&f.file_id);
                 if !crate::auth::share_unlocked(cookie_header, id_for_cookie, hash) {
                     return http_error(StatusCode::UNAUTHORIZED, "需要分享密码", "share_locked")
                         .into_response();
@@ -718,7 +722,7 @@ async fn get_files_list(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "filesize": f.filesize,
                 "upload_date": f.upload_date,
                 "short_id": f.short_id,
-                "has_password": f.share_password.is_some(),
+                "has_password": f.has_share_password(),
             })
         })
         .collect();

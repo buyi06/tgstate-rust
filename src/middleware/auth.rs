@@ -26,13 +26,15 @@ fn extract_cookie<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<
         })
 }
 
-fn redirect_or_401(path: &str, accept_html: bool) -> Response {
+fn redirect_or_401(path: &str, accept_html: bool, no_password: bool) -> Response {
     if accept_html && !path.starts_with("/api/") {
-        // Redirect browsers to /login
+        // First-run (no admin password): send browsers to the onboarding page.
+        // Otherwise send them to login.
+        let dest = if no_password { "/welcome" } else { "/login" };
         let mut resp = Response::new(Body::empty());
         *resp.status_mut() = StatusCode::SEE_OTHER;
         resp.headers_mut()
-            .insert(axum::http::header::LOCATION, "/login".parse().unwrap());
+            .insert(axum::http::header::LOCATION, dest.parse().unwrap());
         resp
     } else {
         let mut resp = Response::new(Body::from(
@@ -108,6 +110,23 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+/// Exact / prefix match for public allow-lists.
+///
+/// IMPORTANT: `"/"` must only match the root path itself. A naive
+/// `path.starts_with("/")` would make every route public.
+pub fn path_is_allowed(path: &str, allowed: &[&str]) -> bool {
+    allowed.iter().any(|p| {
+        if *p == "/" {
+            path == "/"
+        } else if p.ends_with('/') {
+            // Prefix form, e.g. "/api/verify/"
+            path == p.trim_end_matches('/') || path.starts_with(p)
+        } else {
+            path == *p || path.starts_with(&format!("{p}/"))
+        }
+    })
+}
+
 fn load_settings_snapshot(
     state: &Arc<AppState>,
 ) -> (Option<String>, Option<String>) {
@@ -176,18 +195,19 @@ pub async fn auth_middleware(
 
     // Always-allowed API paths (regardless of password state)
     let always_public = ["/api/health"];
-    if always_public.iter().any(|p| &path == p || path.starts_with(&format!("{}/", p))) {
+    if path_is_allowed(&path, &always_public) {
         return next.run(req).await;
     }
 
     let (active_pwd, session_token) = load_settings_snapshot(&state);
+    let no_password = active_pwd.as_deref().unwrap_or("").is_empty();
 
     // No password configured: only the first-run onboarding surface should be
-    // publicly reachable. Other endpoints are behind the session cookie check
-    // further below, which will pass trivially when no password is set.
-    if active_pwd.as_deref().unwrap_or("").is_empty() {
+    // publicly reachable. Everything else (upload/delete/list/settings) is denied
+    // so an attacker cannot manage files before the owner finishes setup.
+    if no_password {
         let public_no_auth = [
-            "/",
+            "/welcome",
             "/login",
             "/api/auth/login",
             "/api/auth/logout",
@@ -197,28 +217,22 @@ pub async fn auth_middleware(
             "/api/app-config/apply",
             "/api/set-password",
         ];
-        if public_no_auth
-            .iter()
-            .any(|p| &path == p || path.starts_with(&format!("{}/", p)) || path.starts_with(p))
-        {
+        if path_is_allowed(&path, &public_no_auth) {
             return next.run(req).await;
         }
-        // First-run mode: password has not been set yet. Only the onboarding
-        // surface above is reachable. Deny everything else so an attacker
-        // cannot upload/delete/list before the owner finishes setup.
         let headers = req.headers().clone();
-        return redirect_or_401(&path, wants_html(&headers));
+        return redirect_or_401(&path, wants_html(&headers), true);
     }
 
     // Password configured: a narrow set of API routes is always public so that
     // the login form and logout endpoint remain usable. `/api/verify/*` is no
     // longer public once a password is set — it leaks bot/channel validity.
     let public_api = ["/api/auth/login", "/api/auth/logout"];
-    if public_api.iter().any(|p| &path == p) {
+    if path_is_allowed(&path, &public_api) {
         return next.run(req).await;
     }
     // Login page itself must be reachable without auth so users can log in.
-    if &path == "/login" {
+    if path == "/login" || path == "/pwd" {
         return next.run(req).await;
     }
 
@@ -228,10 +242,6 @@ pub async fn auth_middleware(
     if check_session(cookie, active_pwd.as_deref(), session_token.as_deref()) {
         // Sliding expiration: re-issue the cookie with a fresh Max-Age on every
         // authenticated request, so active users stay logged in indefinitely.
-        // We only refresh on non-API HTML page loads and safe (GET/HEAD) API
-        // calls to avoid mutating Set-Cookie on every XHR response, which
-        // would be wasteful; GETs are frequent enough in normal use to keep
-        // the cookie fresh.
         let secure = is_https(&headers);
         let token = session_token.as_deref().unwrap_or("").to_string();
         let mut resp = next.run(req).await;
@@ -246,5 +256,31 @@ pub async fn auth_middleware(
         return resp;
     }
 
-    redirect_or_401(&path, wants_html(&headers))
+    redirect_or_401(&path, wants_html(&headers), false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_is_allowed;
+
+    #[test]
+    fn root_is_exact_only() {
+        let allowed = ["/", "/welcome", "/api/set-password"];
+        assert!(path_is_allowed("/", &allowed));
+        assert!(!path_is_allowed("/api/files", &allowed));
+        assert!(!path_is_allowed("/settings", &allowed));
+        assert!(!path_is_allowed("/api/files/x", &allowed));
+    }
+
+    #[test]
+    fn prefix_and_exact_forms() {
+        let allowed = ["/api/verify/", "/api/app-config", "/welcome"];
+        assert!(path_is_allowed("/api/verify", &allowed));
+        assert!(path_is_allowed("/api/verify/bot", &allowed));
+        assert!(path_is_allowed("/api/app-config", &allowed));
+        assert!(path_is_allowed("/api/app-config/save", &allowed));
+        assert!(path_is_allowed("/welcome", &allowed));
+        assert!(!path_is_allowed("/api/files", &allowed));
+        assert!(!path_is_allowed("/", &allowed));
+    }
 }
