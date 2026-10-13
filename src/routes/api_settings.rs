@@ -546,12 +546,16 @@ async fn two_fa_setup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let url = totp::otpauth_url(&secret, &username, "tgState");
 
     // 服务端渲染二维码 SVG（qrcode crate），无需外部 JS，CSP 不破。
+    // ⚠️ 必须显式 turbofish `render::<svg::Color>()`：不写类型参数时，
+    // 编译器会通过 blanket impl `impl<P: Element> Pixel for P` 把 P 推断成
+    // `&str`，走"字符串渲染器"——每模块输出 7 字符的颜色字符串而非
+    // SVG 标记（线上 bug：qr_svg 全是 '#ffffff#ffffff...' 文本）。
     let svg = qrcode::QrCode::new(url.as_bytes())
         .map(|code| {
-            code.render()
+            code.render::<qrcode::render::svg::Color>()
                 .min_dimensions(200, 200)
-                .dark_color("#0f172a")
-                .light_color("#ffffff")
+                .dark_color(qrcode::render::svg::Color("#0f172a"))
+                .light_color(qrcode::render::svg::Color("#ffffff"))
                 .build()
         })
         .unwrap_or_default();
