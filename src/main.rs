@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 mod auth;
 mod config;
 mod constants;
+mod credentials;
 mod database;
 mod error;
 mod events;
@@ -17,6 +18,7 @@ mod middleware;
 mod routes;
 mod state;
 mod telegram;
+mod totp;
 
 use config::Settings;
 use state::AppState;
@@ -43,6 +45,22 @@ async fn main() {
     // Init database with connection pool
     let db_pool = database::init_db(&settings.data_dir);
     tracing::info!("数据库已初始化（连接池已创建）");
+
+    // Ensure the login/2FA/API-key credentials table exists (idempotent).
+    credentials::ensure_table(&db_pool);
+
+    // One-shot migration: legacy single-password deployments get a
+    // username+password account seeded from the old stored hash.
+    // Default username "buyi" (owner's choice); changeable in settings.
+    let legacy_pwd = database::get_app_settings_from_db(&db_pool)
+        .ok()
+        .and_then(|m| m.get("PASS_WORD").and_then(|v| v.clone()))
+        .filter(|p| !p.trim().is_empty());
+    if let Some(pwd) = legacy_pwd.as_deref() {
+        if let Err(e) = credentials::migrate_from_legacy(&db_pool, Some(pwd)) {
+            tracing::warn!("旧密码迁移失败（可稍后在设置里重建账户）: {}", e);
+        }
+    }
 
     // Create shared HTTP client
     let http_client = reqwest::Client::builder()

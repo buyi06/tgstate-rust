@@ -19,12 +19,16 @@
         <div class="panel">
             <div class="panel-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg></div>
             <h1>欢迎使用</h1>
-            <p class="lead">将 Telegram 变成你的无限私有云。先设置一个管理员密码。</p>
+            <p class="lead">将 Telegram 变成你的无限私有云。先设置管理员账号。</p>
             <form id="setup-form" onsubmit="return false;" style="margin-top:24px;">
+                <div class="field" style="margin-bottom:14px;">
+                    <label class="field-label">用户名</label>
+                    <input type="text" class="input" id="username" placeholder="buyi" required autofocus>
+                </div>
                 <div class="field">
-                    <label class="field-label">管理员密码</label>
-                    <input type="password" class="input" id="password" placeholder="设置一个强密码" required autofocus>
-                    <div class="field-hint">用于登录管理控制台。</div>
+                    <label class="field-label">密码</label>
+                    <input type="password" class="input" id="password" placeholder="设置一个强密码" required>
+                    <div class="field-hint">用户名+密码用于登录管理控制台。</div>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block" id="setup-btn" style="margin-top:18px;">完成设置</button>
             </form>
@@ -36,20 +40,22 @@
 <script>
     function submitSetup() {
         var pwd = document.getElementById('password').value;
-        if (!pwd) { Toast.show('请输入密码', 'error'); return; }
+        var user = document.getElementById('username').value.trim();
+        if (!pwd || !user) { Toast.show('请输入用户名和密码', 'error'); return; }
         var btn = document.getElementById('setup-btn');
         Utils.setLoading(btn, true);
-        fetch('/api/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) })
+        fetch('/api/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user, password: pwd }) })
             .then(function (res) {
                 if (!res.ok) { Toast.show('设置失败', 'error'); Utils.setLoading(btn, false); return; }
                 Toast.show('设置成功，正在登录…');
-                return fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) })
+                return fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user, password: pwd }) })
                     .then(function (login) { setTimeout(function () { window.location.href = login.ok ? '/' : '/login'; }, 800); });
             })
             .catch(function () { Toast.show('网络错误', 'error'); Utils.setLoading(btn, false); });
     }
     document.getElementById('setup-btn').addEventListener('click', submitSetup);
     document.getElementById('password').addEventListener('keydown', function (e) { if (e.key === 'Enter') submitSetup(); });
+    document.getElementById('username').addEventListener('keydown', function (e) { if (e.key === 'Enter') document.getElementById('password').focus(); });
 </script>
 </body>
 </html>

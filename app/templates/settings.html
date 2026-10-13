@@ -12,13 +12,73 @@
     <form id="settings-form" onsubmit="return false;" class="stack">
         <div class="card">
             <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg> 账号安全</div>
+            <div class="field" style="margin-bottom:18px;">
+                <label class="field-label">用户名 <span id="user-badge" class="badge badge-success" style="display:none;">已配置</span></label>
+                <input type="text" class="input" id="USERNAME" placeholder="buyi" autocomplete="username">
+                <div class="field-hint">与密码一起用于登录。</div>
+            </div>
             <div class="field">
-                <label class="field-label">管理员密码</label>
+                <label class="field-label">密码</label>
                 <div class="input-affix">
-                    <input type="password" class="input" name="PASS_WORD" id="PASS_WORD" placeholder="留空则不修改">
+                    <input type="password" class="input" name="PASS_WORD" id="PASS_WORD" placeholder="留空则不修改" autocomplete="new-password">
                     <button type="button" class="affix-btn" id="toggle-pwd" title="显示/隐藏"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
                 </div>
+                <div class="field-hint">设置账号 = 用户名 + 密文密码（argon2）。修改任一项都会整体更新。</div>
             </div>
+        </div>
+
+        <div class="card">
+            <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg> 两步验证（2FA · 可选）</div>
+            <div class="between" style="margin-bottom:14px;">
+                <div>
+                    <div id="tfa-state" class="text-sm muted">状态：加载中…</div>
+                </div>
+                <div class="row">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-tfa-enable">开启</button>
+                    <button type="button" class="btn btn-danger btn-sm hidden" id="btn-tfa-disable">关闭</button>
+                </div>
+            </div>
+            <div id="tfa-panel" class="hidden" style="margin-top:6px;">
+                <div id="tfa-qr" style="display:flex; justify-content:center; padding:8px; background:#fff; border-radius:10px; margin-bottom:12px;"></div>
+                <div class="field" style="margin-bottom:10px;">
+                    <label class="field-label">手动输入密钥（无法扫码时）</label>
+                    <div class="copybox">
+                        <input type="text" class="input mono" id="tfa-secret" readonly>
+                        <button type="button" class="btn btn-secondary" id="tfa-copy-secret">复制</button>
+                    </div>
+                </div>
+                <div class="field" style="margin-bottom:12px;">
+                    <label class="field-label">输入验证器当前 6 位动态码确认开启</label>
+                    <input type="text" class="input mono" id="tfa-code" placeholder="123456" maxlength="6" inputmode="numeric" autocomplete="one-time-code">
+                </div>
+                <button type="button" class="btn btn-primary btn-sm" id="tfa-confirm">确认开启</button>
+                <div id="tfa-recovery" class="hidden" style="margin-top:14px; border-top:1px solid var(--border); padding-top:14px;">
+                    <div class="field-label" style="margin-bottom:8px;">恢复码（仅此一次展示，每张可用一次）</div>
+                    <div class="mono text-sm" id="tfa-recovery-list" style="line-height:2; word-break:break-all;"></div>
+                    <button type="button" class="btn btn-secondary btn-sm" id="tfa-copy-recovery" style="margin-top:8px;">复制全部</button>
+                </div>
+            </div>
+            <div class="field-hint">开启后登录需要 用户名 + 密码 + 动态码。支持 Google Authenticator / Aegis / 1Password 等标准 TOTP 验证器。</div>
+        </div>
+
+        <div class="card">
+            <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg> API 密钥（CLI 调用）</div>
+            <div class="between" style="margin-bottom:6px;">
+                <div id="apikey-state" class="text-sm muted">状态：加载中…</div>
+                <div class="row">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-keygen">生成新密钥</button>
+                    <button type="button" class="btn btn-danger btn-sm hidden" id="btn-keyrevoke">吊销</button>
+                </div>
+            </div>
+            <div id="apikey-once" class="hidden" style="margin-top:10px; border-top:1px solid var(--border); padding-top:12px;">
+                <div class="field-label" style="margin-bottom:8px;">新密钥（仅此一次展示）</div>
+                <div class="copybox">
+                    <input type="text" class="input mono" id="apikey-value" readonly>
+                    <button type="button" class="btn btn-secondary" id="apikey-copy">复制</button>
+                </div>
+                <div class="field-hint" style="margin-top:8px;">CLI 用法：<span class="mono">curl -H "Authorization: Bearer tgsk_…" https://buyi.nyc.mn/api/upload -F file=@xx</span></div>
+            </div>
+            <div class="field-hint">密钥只授予文件接口（列表/上传/删除），不可用于账户与设置操作；服务端只存 sha256。</div>
         </div>
 
         <div class="card">
@@ -73,6 +133,7 @@
 document.addEventListener('DOMContentLoaded', function () {
     var Toast = window.Toast, Modal = window.Modal, Utils = window.Utils;
     function $(id) { return document.getElementById(id); }
+    var hasAccount = false;
 
     function initData() {
         fetch('/api/app-config').then(function (r) { return r.json(); }).then(function (data) {
@@ -81,6 +142,92 @@ document.addEventListener('DOMContentLoaded', function () {
             var bu = document.getElementsByName('BASE_URL')[0]; if (bu) bu.value = cfg.BASE_URL || '';
             if (cfg.BOT_TOKEN_SET) { $('bot-badge').style.display = 'inline-flex'; $('BOT_TOKEN').placeholder = '已配置，留空保持不变'; }
         }).catch(function () {});
+        // 账户回显：用户名已配置时展示（只读提示）。
+        fetch('/api/2fa/status').then(function (r) { return r.json(); }).then(function (j) {
+            var u = $('USERNAME');
+            if (j.username) { u.value = j.username; $('user-badge').style.display = 'inline-flex'; hasAccount = true; $('PASS_WORD').placeholder = '留空则不修改'; }
+            if (j.enabled) tfaSetEnabled(true);
+        }).catch(function () {});
+        fetch('/api/apikey/status').then(function (r) { return r.json(); }).then(function (j) {
+            apiKeySetEnabled(!!j.enabled);
+        }).catch(function () {});
+    }
+
+    // ---- 2FA ----
+    var tfaPending = null;
+    function tfaSetEnabled(on) {
+        $('tfa-state').textContent = on ? '状态：已开启' : '状态：未开启';
+        $('btn-tfa-enable').classList.toggle('hidden', on);
+        $('btn-tfa-disable').classList.toggle('hidden', !on);
+        if (!on) { $('tfa-panel').classList.add('hidden'); }
+    }
+    function tfaSetup() {
+        fetch('/api/2fa/setup', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (j) {
+            if (!j.secret) { Toast.show(j.message || '生成失败', 'error'); return; }
+            tfaPending = j;
+            $('tfa-qr').innerHTML = j.qr_svg || '';
+            $('tfa-secret').value = j.secret;
+            $('tfa-code').value = '';
+            $('tfa-recovery').classList.add('hidden');
+            $('tfa-panel').classList.remove('hidden');
+            Toast.show('用验证器扫码，然后输入动态码确认');
+        }).catch(function () { Toast.show('网络错误', 'error'); });
+    }
+    function tfaConfirm() {
+        var code = $('tfa-code').value.trim();
+        if (code.length !== 6) { Toast.show('请输入 6 位动态码', 'error'); return; }
+        fetch('/api/2fa/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: code }) })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+            .then(function (x) {
+                if (!x.ok) { Toast.show((x.j.detail && x.j.detail.message) || '动态码错误', 'error'); return; }
+                tfaSetEnabled(true);
+                if (x.j.recovery_codes) {
+                    $('tfa-recovery-list').textContent = x.j.recovery_codes.join('  ');
+                    $('tfa-recovery').classList.remove('hidden');
+                }
+                Toast.show('两步验证已开启');
+            })
+            .catch(function () { Toast.show('网络错误', 'error'); });
+    }
+    function tfaDisable() {
+        Modal.prompt('关闭两步验证', '输入当前动态码或恢复码以确认关闭：', { placeholder: '123456' }).then(function (code) {
+            if (!code) return;
+            fetch('/api/2fa/disable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: code }) })
+                .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+                .then(function (x) {
+                    if (!x.ok) { Toast.show((x.j.detail && x.j.detail.message) || '码错误', 'error'); return; }
+                    tfaSetEnabled(false);
+                    Toast.show('两步验证已关闭');
+                })
+                .catch(function () { Toast.show('网络错误', 'error'); });
+        });
+    }
+
+    // ---- API 密钥 ----
+    function apiKeySetEnabled(on) {
+        $('apikey-state').textContent = on ? '状态：已配置' : '状态：未配置';
+        $('btn-keyrevoke').classList.toggle('hidden', !on);
+    }
+    function apiKeyGenerate() {
+        Modal.confirm('生成新 API 密钥', '生成将立即使旧密钥失效。继续？', { okText: '生成' }).then(function (ok) {
+            if (!ok) return;
+            fetch('/api/apikey/generate', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (j) {
+                if (!j.api_key) { Toast.show(j.message || '生成失败', 'error'); return; }
+                $('apikey-value').value = j.api_key;
+                $('apikey-once').classList.remove('hidden');
+                apiKeySetEnabled(true);
+                Toast.show('已生成，请立即保存');
+            }).catch(function () { Toast.show('网络错误', 'error'); });
+        });
+    }
+    function apiKeyRevoke() {
+        Modal.confirm('吊销 API 密钥', '吊销后所有使用该密钥的 CLI 调用都会失效。确定？', { danger: true, okText: '吊销' }).then(function (ok) {
+            if (!ok) return;
+            fetch('/api/apikey/revoke', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (j) {
+                if (j.status === 'ok') { apiKeySetEnabled(false); $('apikey-once').classList.add('hidden'); Toast.show('已吊销'); }
+                else Toast.show(j.message || '失败', 'error');
+            }).catch(function () { Toast.show('网络错误', 'error'); });
+        });
     }
 
     function saveConfig(apply) {
@@ -138,6 +285,40 @@ document.addEventListener('DOMContentLoaded', function () {
     $('btn-test-bot').addEventListener('click', testBot);
     $('btn-test-ch').addEventListener('click', testChannel);
     $('btn-reset').addEventListener('click', resetConfig);
+    // 2FA / 账户 / API 密钥
+    $('btn-tfa-enable').addEventListener('click', tfaSetup);
+    $('tfa-confirm').addEventListener('click', tfaConfirm);
+    $('btn-tfa-disable').addEventListener('click', tfaDisable);
+    $('tfa-copy-secret').addEventListener('click', function () { Utils.copy($('tfa-secret').value, true); });
+    $('tfa-copy-recovery').addEventListener('click', function () { Utils.copy($('tfa-recovery-list').textContent, true); });
+    $('btn-keygen').addEventListener('click', apiKeyGenerate);
+    $('btn-keyrevoke').addEventListener('click', apiKeyRevoke);
+    $('apikey-copy').addEventListener('click', function () { Utils.copy($('apikey-value').value, true); });
+    // 保存账号：用户名+密码一起提交（有账户就必须两者皆有）。
+    var saveAccount = function () {
+        var user = $('USERNAME').value.trim();
+        var pwd = $('PASS_WORD').value;
+        if (!user) { Toast.show('请填写用户名', 'error'); return; }
+        if (!pwd) { Toast.show('请填写密码', 'error'); return; }
+        Utils.setLoading($('btn-apply'), true);
+        fetch('/api/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user, password: pwd }) })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+            .then(function (x) {
+                if (x.ok) { Toast.show('账号已更新'); $('PASS_WORD').value = ''; $('user-badge').style.display = 'inline-flex'; hasAccount = true; }
+                else Toast.show((x.j.detail && x.j.detail.message) || '保存失败', 'error');
+            })
+            .catch(function () { Toast.show('网络错误', 'error'); })
+            .finally(function () { Utils.setLoading($('btn-apply'), false); });
+    };
+    // 首启（无账户）时“保存并应用”变成“创建账号”；已有账户时保持原语义，
+    // PASS_WORD 留空 = 不改账号（账户走 saveAccount 单独提交）。
+    $('btn-apply').addEventListener('click', function () {
+        if (hasAccount) { saveConfig(true); return; }
+        var user = $('USERNAME').value.trim();
+        var pwd = $('PASS_WORD').value;
+        if (user || pwd) { saveAccount(); return; }
+        saveConfig(true);
+    });
     initData();
 });
 </script>

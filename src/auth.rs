@@ -18,6 +18,13 @@ pub fn generate_session_token() -> String {
     hex::encode(bytes)
 }
 
+/// Generate a single recovery code: 8 hex chars（2^32 熵，单次有效 + 登录限速兜底）。
+pub fn generate_recovery_code() -> String {
+    let mut bytes = [0u8; 4];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
 fn parse_truthy(s: &str) -> bool {
     matches!(
         s.trim().to_ascii_lowercase().as_str(),
@@ -47,6 +54,12 @@ fn session_max_age_secs() -> u32 {
             .filter(|v| *v > 0)
             .unwrap_or(constants::SESSION_MAX_AGE_SECS)
     })
+}
+
+/// Same TTL as above, as i64 seconds — used by the sessions-table
+/// persistence layer (expires_at bookkeeping).
+pub fn session_ttl_i64() -> i64 {
+    session_max_age_secs() as i64
 }
 
 #[cfg(test)]

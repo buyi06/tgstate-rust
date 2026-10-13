@@ -38,6 +38,16 @@ dotenvy = "0.15"
 # longer a direct dependency.
 hex = "0.4"
 argon2 = "0.5"
+# 2FA（TOTP）与 API 密钥所需的哈希原语：
+# hmac+sha1 → RFC 6238 动态码；sha2 → API 密钥 / 恢复码的 sha256；
+# data-encoding → TOTP 密钥的 base32 编解码。
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+data-encoding = "2"
+
+# 2FA 设置页的二维码（服务端渲染 SVG，避免引入外部 JS 破坏 CSP）
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 # Error handling
 thiserror = "2"

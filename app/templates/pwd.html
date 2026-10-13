@@ -19,10 +19,16 @@
         <div class="panel">
             <div class="panel-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg></div>
             <h1>欢迎回来</h1>
-            <p class="lead">输入管理员密码以继续。</p>
+            <p class="lead">输入账号信息以继续。</p>
             <form id="login-form" onsubmit="return false;" style="margin-top:22px;">
-                <div class="field">
-                    <input type="password" class="input" id="password" placeholder="密码" required autofocus>
+                <div class="field" id="username-field" style="margin-bottom:14px;">
+                    <input type="text" class="input" id="username" placeholder="用户名" autocomplete="username" required autofocus>
+                </div>
+                <div class="field" id="password-field">
+                    <input type="password" class="input" id="password" placeholder="密码" autocomplete="current-password" required>
+                </div>
+                <div class="field hidden" id="mfa-field" style="margin-top:14px;">
+                    <input type="text" class="input mono" id="totp" placeholder="两步验证码（6 位数字或恢复码）" autocomplete="one-time-code" style="letter-spacing:2px;">
                 </div>
                 <button type="submit" class="btn btn-primary btn-block" id="login-btn" style="margin-top:16px;">登录</button>
             </form>
@@ -32,24 +38,52 @@
 </div>
 <script src="/static/ui.js?v=6.0"></script>
 <script>
+    var mfaTicket = null;
     function doLogin() {
         var pwd = document.getElementById('password').value;
-        if (!pwd) return;
+        var user = document.getElementById('username').value.trim();
+        var mfa = document.getElementById('totp').value.trim();
+        var body;
+        if (mfaTicket) {
+            if (!mfa) { Toast.show('请输入两步验证码', 'error'); return; }
+            body = { mfa_ticket: mfaTicket, password: '', totp: mfa };
+        } else {
+            if (!user || !pwd) return;
+            body = { username: user, password: pwd };
+        }
         var btn = document.getElementById('login-btn');
         Utils.setLoading(btn, true);
-        fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) })
-            .then(function (r) {
-                if (r.ok) { window.location.replace('/'); }
-                else {
-                    Toast.show('密码错误', 'error');
-                    var p = document.getElementById('password'); p.value = ''; p.focus();
+        fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+            .then(function (x) {
+                if (x.ok && x.j.status === 'ok') { window.location.replace('/'); return; }
+                if (x.j.status === 'mfa_required') {
+                    // 密码已对、需要第二因素：切换到输码界面（票据 90 秒内有效）。
+                    mfaTicket = x.j.mfa_ticket;
+                    document.getElementById('username-field').classList.add('hidden');
+                    document.getElementById('password-field').classList.add('hidden');
+                    document.getElementById('mfa-field').classList.remove('hidden');
+                    document.getElementById('login-btn').textContent = '验证';
+                    document.getElementById('totp').focus();
+                    Toast.show('请输入验证器中的 6 位动态码（或恢复码）');
                     Utils.setLoading(btn, false);
+                    return;
                 }
+                Toast.show(x.j.message || '用户名或密码错误', 'error');
+                if (mfaTicket) {
+                    // 第二步失败：票据作废，回到用户名+密码第一步。
+                    mfaTicket = null;
+                    setTimeout(function () { location.reload(); }, 900);
+                    return;
+                }
+                var p = document.getElementById('password'); p.value = ''; p.focus();
+                Utils.setLoading(btn, false);
             })
             .catch(function () { Toast.show('网络错误', 'error'); Utils.setLoading(btn, false); });
     }
     document.getElementById('login-btn').addEventListener('click', doLogin);
     document.getElementById('password').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
+    document.getElementById('totp').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
 </script>
 </body>
 </html>

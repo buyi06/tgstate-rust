@@ -35,13 +35,17 @@ pub const RATE_LIMIT_MAX_ENTRIES: usize = 10_000;
 /// SSE keepalive interval in seconds
 pub const SSE_KEEPALIVE_SECS: u64 = 15;
 
-/// Session cookie max-age in seconds (7 days). Combined with the sliding
-/// refresh in `middleware::auth`, a user who visits the site at least once
-/// a week stays logged in indefinitely; otherwise the cookie expires and
-/// the user must log in again. May be overridden by env `SESSION_MAX_AGE_SECS`
-/// at runtime (see `auth::build_cookie`). The previous 30-day default was
-/// longer than SECURITY.md advertised and is shortened here.
-pub const SESSION_MAX_AGE_SECS: u32 = 7 * 24 * 60 * 60;
+/// Session cookie max-age in seconds (30 days). Sessions are persisted in
+/// SQLite (`sessions` table) so restarts no longer log users out; combined
+/// with the sliding renewal in the auth middleware a user who visits at
+/// least once a month stays logged in. May be overridden by env
+/// `SESSION_MAX_AGE_SECS` at runtime (see `auth::build_cookie`).
+pub const SESSION_MAX_AGE_SECS: u32 = 30 * 24 * 60 * 60;
+
+/// Hard lifetime cap for a persisted session, measured from its creation.
+/// Even with sliding renewal, a session older than this forces a re-login
+/// (defense in depth: bounds the blast radius of a stolen cookie).
+pub const SESSION_ABSOLUTE_MAX_SECS: i64 = 180 * 24 * 60 * 60;
 
 /// Short ID length for file identifiers. Ten chars of 62-alphabet ≈ 60 bits of
 /// entropy, which is practical-only enumeration-resistant for a single-admin
