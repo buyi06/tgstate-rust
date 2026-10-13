@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -548,10 +548,10 @@ async fn two_fa_setup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // 服务端渲染二维码 SVG（qrcode crate），无需外部 JS，CSP 不破。
     let svg = qrcode::QrCode::new(url.as_bytes())
         .map(|code| {
-            code.render::<qrcode::color::Svg>()
+            code.render()
                 .min_dimensions(200, 200)
-                .dark_color(qrcode::color::Svg("#0f172a"))
-                .light_color(qrcode::color::Svg("#ffffff"))
+                .dark_color("#0f172a")
+                .light_color("#ffffff")
                 .build()
         })
         .unwrap_or_default();
@@ -584,7 +584,7 @@ pub struct TwoFaEnableRequest {
 async fn two_fa_enable(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<TwoFaEnableRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let pending = PENDING_2FA
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
@@ -643,6 +643,7 @@ async fn two_fa_enable(
         "message": "两步验证已启用",
         "recovery_codes": p.recovery_plain,
     }))
+    .into_response()
 }
 
 /// 关闭 2FA（需要当前有效的 6 位码；防止会话被劫持后直接关掉第二因素）。
@@ -654,7 +655,7 @@ pub struct TwoFaDisableRequest {
 async fn two_fa_disable(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<TwoFaDisableRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let creds = credentials::get(&state.db_pool).unwrap_or_default();
     if !creds.has_totp() {
         return http_error(
@@ -711,7 +712,7 @@ async fn two_fa_disable(
         )
         .into_response();
     }
-    Json(serde_json::json!({ "status": "ok", "message": "两步验证已关闭" }))
+    Json(serde_json::json!({ "status": "ok", "message": "两步验证已关闭" })).into_response()
 }
 
 /// 2FA 状态查询（设置页回显）。
@@ -726,7 +727,7 @@ async fn two_fa_status(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 }
 
 /// 生成新的 API 密钥：明文只在本次响应返回，库中只落 sha256。
-async fn api_key_generate(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn api_key_generate(State(state): State<Arc<AppState>>) -> Response {
     let key = credentials::generate_api_key();
     let hash = credentials::sha256_hex(&key);
     if let Err(e) = credentials::save_api_key_hash(&state.db_pool, Some(&hash)) {
@@ -744,10 +745,11 @@ async fn api_key_generate(State(state): State<Arc<AppState>>) -> impl IntoRespon
         "api_key": key,
         "message": "密钥仅此一次展示，请立即保存到安全位置",
     }))
+    .into_response()
 }
 
 /// 吊销 API 密钥。
-async fn api_key_revoke(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn api_key_revoke(State(state): State<Arc<AppState>>) -> Response {
     if let Err(e) = credentials::save_api_key_hash(&state.db_pool, None) {
         tracing::error!("吊销 API 密钥失败: {}", e);
         return http_error(
@@ -757,16 +759,17 @@ async fn api_key_revoke(State(state): State<Arc<AppState>>) -> impl IntoResponse
         )
         .into_response();
     }
-    Json(serde_json::json!({ "status": "ok", "message": "API 密钥已吊销" }))
+    Json(serde_json::json!({ "status": "ok", "message": "API 密钥已吊销" })).into_response()
 }
 
 /// API 密钥状态（有没有配置过；永不回显任何密钥材料）。
-async fn api_key_status(State(state): State<Arc<AppState>) -> impl IntoResponse {
+async fn api_key_status(State(state): State<Arc<AppState>>) -> Response {
     let creds = credentials::get(&state.db_pool).unwrap_or_default();
     Json(serde_json::json!({
         "status": "ok",
         "enabled": creds.has_api_key(),
     }))
+    .into_response()
 }
 
 pub fn router() -> Router<Arc<AppState>> {

@@ -308,7 +308,7 @@ pub async fn auth_middleware(
         }
         // 带了密钥但无效/越权 → 直接 401（不落到页面重定向；CLI 需要明确的 JSON 错误）。
         tracing::warn!("API 密钥校验失败或超出范围");
-        return redirect_or_401(&path, false);
+        return redirect_or_401(&path, false, false);
     }
 
     let cookie = extract_cookie(&headers, COOKIE_NAME);

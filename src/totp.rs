@@ -5,19 +5,17 @@
 //!
 //! 参考：RFC 4226（HOTP）、RFC 6238（TOTP，默认 SHA1/6 位/30s）。
 
-use data_encoding::BASE32_NOPADDING;
+use data_encoding::BASE32;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha1::Sha1;
-
-const BASE32_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 /// 生成 20 字节（160-bit）随机密钥，返回 base32（无填充）编码。
 /// 20 字节正是 SHA1 摘要长度，也是各家验证器 App 的默认推荐长度。
 pub fn generate_secret_base32() -> String {
     let mut bytes = [0u8; 20];
     rand::thread_rng().fill_bytes(&mut bytes);
-    BASE32_NOPADDING.encode(&bytes)
+    BASE32.encode(&bytes)
 }
 
 /// base32 密钥 → 原始字节。非法输入返回 None（调用方按“验证失败”处理）。
@@ -28,7 +26,7 @@ fn decode_secret(secret_b32: &str) -> Option<Vec<u8>> {
         .filter(|c| !c.is_whitespace() && *c != '=' && *c != '-')
         .map(|c| c.to_ascii_uppercase())
         .collect();
-    BASE32_NOPADDING.decode(cleaned.as_bytes()).ok()
+    BASE32.decode(cleaned.as_bytes()).ok()
 }
 
 /// RFC 4226 HOTP：HMAC-SHA1(secret, counter) → 动态截断 → 6 位十进制。
@@ -97,7 +95,7 @@ mod tests {
     /// RFC 4226 附录 D 的测试向量（SHA1, 6 位）。
     #[test]
     fn hotp_matches_rfc4226_vectors() {
-        let secret = BASE32_NOPADDING.decode(b"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+        let secret = BASE32.decode(b"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
         let expected = ["755224", "287082", "359152", "969429", "338314"];
         for (i, exp) in expected.iter().enumerate() {
             assert_eq!(&hotp(&secret, i as u64), exp, "counter {}", i);
