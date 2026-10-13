@@ -146,11 +146,11 @@ document.addEventListener('DOMContentLoaded', function () {
         fetch('/api/2fa/status').then(function (r) { return r.json(); }).then(function (j) {
             var u = $('USERNAME');
             if (j.username) { u.value = j.username; $('user-badge').style.display = 'inline-flex'; hasAccount = true; $('PASS_WORD').placeholder = '留空则不修改'; }
-            if (j.enabled) tfaSetEnabled(true);
-        }).catch(function () {});
+            tfaSetEnabled(!!j.enabled);
+        }).catch(function () { tfaSetEnabled(false); });
         fetch('/api/apikey/status').then(function (r) { return r.json(); }).then(function (j) {
             apiKeySetEnabled(!!j.enabled);
-        }).catch(function () {});
+        }).catch(function () { apiKeySetEnabled(false); });
     }
 
     // ---- 2FA ----
